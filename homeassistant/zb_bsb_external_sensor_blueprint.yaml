@@ -1,0 +1,53 @@
+blueprint:
+  name: "ZB-BSB — Associer une Sonde de Température Externe à un Thermostat (Zone 1 ou Zone 2)"
+  description: >
+    Ce Blueprint permet de sélectionner graphiquement dans Home Assistant n'importe quelle sonde de température
+    (Zigbee, Bluetooth, Matter, Wi-Fi, Netatmo, etc. — ex: `sensor.thermometre_temperature`) pour alimenter
+    la température ambiante d'un Thermostat ZB-BSB (Zone 1 ou Zone 2) et la diffuser automatiquement sur le bus BSB
+    de la pompe à chaleur.
+  domain: automation
+  input:
+    external_temp_sensor:
+      name: "Sonde de température d'ambiance externe (Home Assistant)"
+      description: "Choisissez le capteur de température de la pièce (ex: sensor.thermometre_temperature)."
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+    target_zb_bsb_number:
+      name: "Entité 'Sonde Temp. Externe Zone 1 / Zone 2' du ZB-BSB"
+      description: >
+        Sélectionnez l'entité `number` exposée par ZB-BSB correspondant à la zone souhaitée
+        (Endpoint 3 pour Zone 1, Endpoint 4 pour Zone 2).
+      selector:
+        entity:
+          domain: number
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - platform: state
+    entity_id: !input external_temp_sensor
+  - platform: time_pattern
+    minutes: "/10"
+  - platform: homeassistant
+    event: start
+
+variables:
+  sensor_entity: !input external_temp_sensor
+  raw_state: "{{ states(sensor_entity) }}"
+
+condition:
+  - condition: template
+    value_template: >
+      {{ raw_state not in ['unknown', 'unavailable', 'none', '']
+         and (raw_state | float(-99)) >= 5.0
+         and (raw_state | float(-99)) <= 35.0 }}
+
+action:
+  - service: number.set_value
+    target:
+      entity_id: !input target_zb_bsb_number
+    data:
+      value: "{{ (states(sensor_entity) | float) | round(1) }}"

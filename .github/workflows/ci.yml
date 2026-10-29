@@ -1,0 +1,185 @@
+name: ZB-BSB CI & OTA Release
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      ota_version:
+        description: "Version OTA en hexadécimal (ex: 0x01020000). Laisser vide pour utiliser custom_ota_version de platformio.ini"
+        required: false
+        default: ""
+        type: string
+      release_notes:
+        description: "Notes de version (optionnel)"
+        required: false
+        default: "Publication Zigbee OTA générée automatiquement via GitHub Actions."
+        type: string
+
+jobs:
+  unit-tests:
+    name: Native BSB Protocol Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+      - name: Run Native Unit Tests (Unity)
+        run: pio test -e native -v
+
+  firmware-build:
+    name: Build XIAO ESP32-C6 Firmware & Zigbee OTA Package
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    outputs:
+      ota_version_hex: ${{ steps.meta.outputs.ota_version_hex }}
+      ota_version_dec: ${{ steps.meta.outputs.ota_version_dec }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Compute OTA Version & GitHub Release Base URL
+        id: meta
+        env:
+          INPUT_OTA_VERSION: ${{ inputs.ota_version }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - << 'EOF'
+          import configparser, os
+
+          raw_ver = os.environ.get("INPUT_OTA_VERSION", "").strip()
+          if not raw_ver:
+              cfg = configparser.ConfigParser()
+              cfg.read("platformio.ini")
+              raw_ver = cfg.get("env:seeed_xiao_esp32c6", "custom_ota_version", fallback="0x01010000").strip()
+
+          ver_int = int(raw_ver, 0)
+          ver_hex = f"{ver_int:08X}"
+          tag = f"v{ver_hex}"
+          repo = os.environ["GH_REPO"]
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"ota_version_hex=0x{ver_hex}\n")
+              fh.write(f"ota_version_dec={ver_int}\n")
+              fh.write(f"release_tag={tag}\n")
+
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write(f"ZB_BSB_OTA_VERSION=0x{ver_hex}\n")
+              fh.write(f"ZB_BSB_OTA_BASE_URL={base_url}\n")
+
+          print(f"OTA Version : 0x{ver_hex} ({ver_int})")
+          print(f"Release Tag : {tag}")
+          print(f"OTA Base URL: {base_url}")
+          EOF
+
+      - name: Build Firmware & Generate Zigbee OTA Package (.ota + index.json)
+        run: pio run -e seeed_xiao_esp32c6
+
+      - name: Upload Firmware & OTA Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zb-bsb-ota-${{ steps.meta.outputs.release_tag }}
+          path: |
+            ota/index.json
+            ota/*.ota
+            .pio/build/seeed_xiao_esp32c6/firmware.bin
+            .pio/build/seeed_xiao_esp32c6/firmware.factory.bin
+          if-no-files-found: error
+
+  publish-ota:
+    name: Publish Zigbee OTA Release on GitHub (Manual Trigger)
+    runs-on: ubuntu-latest
+    needs: firmware-build
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Built OTA Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: zb-bsb-ota-${{ needs.firmware-build.outputs.release_tag }}
+          path: dist
+
+      - name: Create or Update GitHub Release & Upload OTA Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.firmware-build.outputs.release_tag }}
+          OTA_VER_HEX: ${{ needs.firmware-build.outputs.ota_version_hex }}
+          OTA_VER_DEC: ${{ needs.firmware-build.outputs.ota_version_dec }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          TITLE="ZB-BSB Firmware OTA ${OTA_VER_HEX}"
+          NOTES="${RELEASE_NOTES}
+
+          ### Informations Zigbee OTA
+          - **Version OTA (hex)** : \`${OTA_VER_HEX}\` (\`${OTA_VER_DEC}\`)
+          - **Manufacturer Code** : \`0x131B\` (\`4891\`)
+          - **Image Type** : \`0x0001\` (\`1\`)
+          - **URL Manifeste ZHA (\`index.json\`)** : \`https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/index.json\`
+          "
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} existe déjà -> mise à jour des assets OTA..."
+            gh release upload "${RELEASE_TAG}" \
+              dist/ota/index.json \
+              dist/ota/*.ota \
+              dist/.pio/build/seeed_xiao_esp32c6/firmware.bin \
+              dist/.pio/build/seeed_xiao_esp32c6/firmware.factory.bin \
+              --clobber
+            gh release edit "${RELEASE_TAG}" --title "${TITLE}" --notes "${NOTES}" --latest
+          else
+            echo "Création de la Release ${RELEASE_TAG}..."
+            gh release create "${RELEASE_TAG}" \
+              dist/ota/index.json \
+              dist/ota/*.ota \
+              dist/.pio/build/seeed_xiao_esp32c6/firmware.bin \
+              dist/.pio/build/seeed_xiao_esp32c6/firmware.factory.bin \
+              --title "${TITLE}" \
+              --notes "${NOTES}" \
+              --latest
+          fi
+
+      - name: Write OTA Instructions to Job Summary
+        run: |
+          cat << 'EOF' >> "$GITHUB_STEP_SUMMARY"
+          ## 🚀 Release Zigbee OTA publiée avec succès !
+
+          - **Tag Release** : `${{ needs.firmware-build.outputs.release_tag }}`
+          - **Version Firmware OTA** : `${{ needs.firmware-build.outputs.ota_version_hex }}` (`${{ needs.firmware-build.outputs.ota_version_dec }}`)
+          - **URL permanente du manifeste `index.json` (pour ZHA)** :
+            `https://github.com/${{ github.repository }}/releases/latest/download/index.json`
+
+          ### Configuration Home Assistant (`configuration.yaml`)
+          ```yaml
+          zha:
+            enable_quirks: true
+            custom_quirks_path: /config/zha_quirks
+            zigpy_config:
+              ota:
+                extra_providers:
+                  - type: z2m
+                    url: https://github.com/${{ github.repository }}/releases/latest/download/index.json
+          ```
+
+          ### Déclenchement immédiat via `zha_toolkit`
+          ```yaml
+          action: zha_toolkit.ota_notify
+          data:
+            ieee: 10:bd:a3:ff:fe:a1:83:28
+          ```
+          EOF
