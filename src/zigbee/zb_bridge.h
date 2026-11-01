@@ -60,6 +60,21 @@ public:
     void set_external_room_temperature(uint8_t zone_index, float temp_c);
 
     /**
+     * @brief Charge depuis la NVS le choix d'antenne RF (false = interne par défaut, true = U.FL externe).
+     */
+    static bool load_external_antenna_nvs();
+
+    /**
+     * @brief Active ou désactive à chaud l'antenne Zigbee externe U.FL (GPIO14) et sauvegarde en NVS.
+     */
+    void set_external_antenna_enabled(bool enabled);
+
+    /**
+     * @brief Indique si l'antenne externe U.FL est actuellement sélectionnée.
+     */
+    bool is_external_antenna_enabled() const { return ext_antenna_enabled_; }
+
+    /**
      * @brief Indique si le nœud est actuellement connecté au réseau Zigbee.
      */
     bool is_connected() const { return connected_; }
@@ -136,13 +151,14 @@ private:
     bool                 connected_         = false;
     volatile bool        ota_in_progress_   = false;
 
-    bool                 comp_running_      = false;
-    bool                 hp_pump_running_   = false;
-    bool                 z1_pump_running_   = false;
-    bool                 z2_pump_running_   = false;
+    bool                 comp_running_        = false;
+    bool                 hp_pump_running_     = false;
+    bool                 z1_pump_running_     = false;
+    bool                 z2_pump_running_     = false;
+    bool                 ext_antenna_enabled_ = false;
 
-    ExternalSensorState  ext_sensor_z1_     = {};
-    ExternalSensorState  ext_sensor_z2_     = {};
+    ExternalSensorState  ext_sensor_z1_       = {};
+    ExternalSensorState  ext_sensor_z2_       = {};
 };
 
 } // namespace zb_bsb

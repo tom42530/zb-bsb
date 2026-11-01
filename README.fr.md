@@ -26,8 +26,9 @@
      - Détection intelligente des sondes physiquement câblées par **filtrage des valeurs sentinelles** (`50.0 °C` renvoyé lorsqu'une zone n'a pas de sonde d'ambiance filaire, `0.0 °C` lorsqu'une zone n'a pas de sonde de départ dédiée, ou octet d'état `flag_byte != 0x00`).
      - Présence d'un **Ballon ECS (DHW)** et d'un **Appoint Électrique**.
    - La topologie découverte est sauvegardée en mémoire non-volatile (**NVS**) : les redémarrages suivants sont instantanés et **seuls les Endpoints/Clusters Zigbee correspondant aux organes réellement présents** sont exposés au coordinateur.
-4. **Routeur Zigbee 3.0 Haute Puissance (`+20 dBm`)** :
-   - Alimenté en continu près de la pompe à chaleur, l'ESP32-C6 fonctionne en **Routeur Zigbee (`ZCZR`)** avec sa puissance d'émission poussée à **`+20 dBm`** et son commutateur d'antenne RF intégré activé, renforçant le maillage Zigbee de votre logement (garage, buanderie, sous-sol).
+4. **Routeur Zigbee 3.0 Haute Puissance (`+20 dBm`) & Switch Antenne Externe Dynamique** :
+   - Alimenté en continu près de la pompe à chaleur, l'ESP32-C6 fonctionne en **Routeur Zigbee (`ZCZR`)** avec sa puissance d'émission poussée à **`+20 dBm`**, renforçant le maillage Zigbee de votre logement (garage, buanderie, sous-sol).
+   - **Sélection d'antenne RF à chaud** : expose une entité `switch` Zigbee sur l'**Endpoint 7** permettant de basculer depuis Home Assistant entre l'antenne céramique SMD intégrée (**OFF**, par défaut) et une antenne externe branchée sur le connecteur **U.FL** (**ON**) sans recompiler le firmware (réglage sauvegardé en NVS).
 
 ---
 
@@ -107,10 +108,10 @@ Le bus BSB (`CL+` / `CL-`) utilise une signalisation différentielle basse vites
 | **Alimentation** | **`5V` / `GND`** | — | Alimentation 5V continue (`>= 250 mA` recommandé, active le rôle **Routeur Zigbee 3.0**) |
 | **LED Statut** | *Interne* | `GPIO15` | LED jaune programmable :<br>• **Clignotement (500 ms)** : Recherche / appairage Zigbee<br>• **Allumée fixe** : Associé et connecté au réseau Zigbee<br>• **Clignotement rapide (120 ms)** : Appui bouton 3 à 8s (Re-scan BSB)<br>• **Stroboscope (50 ms)** : Appui bouton > 8s (Reset Usine Zigbee) |
 | **Bouton `BOOT`** | *Interne* | `GPIO9` | • Maintenir **3 à 8 s** : Relance une **Auto-Découverte BSB** complète<br>• Maintenir **> 8 s** : **Reset Usine Zigbee** + Effacement NVS + Redémarrage |
-| **Switch Antenne RF** | *Interne* | `GPIO3` / `GPIO14` | Commutateur `FM8625H` piloté automatiquement (`GPIO3=LOW`, `GPIO14=LOW` pour antenne céramique interne) |
+| **Switch Antenne RF** | *Interne* | `GPIO3` / `GPIO14` | Commutateur `FM8625H` pilotable dynamiquement depuis Home Assistant (**OFF** par défaut = antenne céramique interne, **ON** = antenne externe U.FL, sauvegardé en NVS) |
 
-> [!IMPORTANT]
-> Pour utiliser une antenne externe branchée sur le connecteur **U.FL** du XIAO ESP32-C6 au lieu de l'antenne céramique SMD intégrée, passez simplement `zb_bsb::board::init_xiao_rf_antenna(true);` dans [`src/main.cpp`](src/main.cpp).
+> [!TIP]
+> Vous pouvez basculer à chaud entre l'antenne céramique SMD intégrée (**OFF**, par défaut) et une antenne externe branchée sur le connecteur **U.FL** (**ON**) directement depuis Home Assistant via le **Switch de l'Endpoint 7** sans recompiler le firmware. Le réglage est mémorisé en NVS et conservé après redémarrage ou mise à jour OTA.
 
 ---
 
@@ -152,7 +153,7 @@ Lors du premier démarrage, **ZB-BSB** interroge la PAC et n'active que les Endp
 | **EP 4** | **Si Hydraulique Retour PAC ou Zone 2 présents** | • `TemperatureMeasurement` (`0x0402`) : **Temp. Retour PAC (`8410`)**<br>• `AnalogInput` (`0x000C`) : **Code Statut Zone 1 (`8000`)**<br>• `AnalogOutput` (`0x000D`) : **Sonde Temp. Externe Zone 2 (`0–35 °C`)** | • Sensor **Température Retour PAC (°C)**<br>• Sensor **Code Statut Zone 1 (`8000`)**<br>• Number **Sonde Temp. Externe Zone 2 (°C)** |
 | **EP 5** | **Si Sonde Départ Zone (`8773`/`8743`) présente** | • `TemperatureMeasurement` (`0x0402`) : **Temp. Départ Zone (`8773` / `8743`)**<br>• `AnalogInput` (`0x000C`) : **Consigne Active Zone 2 (`8771`)** | • Sensor **Température Départ Zone (°C)**<br>• Sensor **Consigne Active Zone 2 (°C)** |
 | **EP 6** | **Si Ballon ECS (`8830`/`1610`) présent** | • `Thermostat` (`0x0201`) : **Thermostat Ballon ECS** (Mode `Off`/`Heat`, Consigne nominale `1610` 30–65 °C, Consigne réduite `1612`, État de chauffe active `8003`)<br>• `TemperatureMeasurement` (`0x0402`) : **Temp. Ballon ECS (`8830`)**<br>• `AnalogOutput` (`0x000D`) : **Consigne Ballon ECS (`1610`)**<br>• `OnOff` (`0x0006`) : **Activation Marche/Arrêt ECS (`1600`)**<br>• `AnalogInput` (`0x000C`) : **Code Statut ECS (`8003`)** | • Climate **Thermostat Ballon ECS (30–65 °C)**<br>• Sensor **Température Ballon ECS (°C)**<br>• Number **Consigne Ballon ECS (30–65 °C)**<br>• Switch **Marche/Arrêt ECS**<br>• Sensor **Code Statut ECS (`8003`)** |
-| **EP 7** | **Si Appoint Électrique (`8402`) présent** | • `BinaryInput` (`0x000F`) : **État Appoint Électrique (`8402`)**<br>• `AnalogInput` (`0x000C`) : **Modulation Appoint % (`8414`)**<br>• `TemperatureMeasurement` (`0x0402`) : **Temp. Ambiante Zone 1 (`8740`)** *(si sonde filaire BSB présente)* | • Binary Sensor **Appoint Électrique**<br>• Sensor **Modulation Appoint (%)**<br>• Sensor **Température Ambiante Zone 1 (°C)** *(si filaire)* |
+| **EP 7** | **Toujours actif** (Auxiliaires & Switch Antenne RF) | • `BinaryInput` (`0x000F`) : **État Appoint Électrique (`8402`)**<br>• `AnalogInput` (`0x000C`) : **Modulation Appoint % (`8414`)**<br>• `TemperatureMeasurement` (`0x0402`) : **Temp. Ambiante Zone 1 (`8740`)** *(si sonde filaire BSB présente)*<br>• `OnOff` (`0x0006`) : **Switch Antenne Zigbee Externe U.FL (`GPIO14`)** | • Binary Sensor **Appoint Électrique**<br>• Sensor **Modulation Appoint (%)**<br>• Sensor **Température Ambiante Zone 1 (°C)** *(si filaire)*<br>• Switch **Antenne Zigbee Externe U.FL** (`OFF` par défaut) |
 
 ---
 
@@ -250,16 +251,16 @@ Le workflow GitHub Actions [`.github/workflows/ci.yml`](.github/workflows/ci.yml
    ```
 3. Déposez `ota/index.json` et `ota/zb_bsb_v01020000.ota` sur votre serveur web HTTP/HTTPS et renseignez `url: https://ota.mon-domaine.fr/zb-bsb/index.json` dans `extra_providers`.
 
-### Déclencher la mise à jour OTA immédiatement avec `zha_toolkit`
-Dans Home Assistant (**Outils de développement → Actions**), appelez le service `zha_toolkit.ota_notify` :
-```yaml
-action: zha_toolkit.ota_notify
-data:
-  ieee: 10:bd:a3:ff:fe:a1:83:28
-```
-- ZHA interroge le fichier `index.json` (sur GitHub Releases ou votre serveur), télécharge le fichier `.ota` correspondant à la nouvelle version, puis envoie la commande `Image Notify` au XIAO ESP32-C6.
-- Pendant le téléchargement OTA, la LED du XIAO clignote rapidement (`200 ms`), les rapports périodiques de capteurs sont suspendus pour maximiser le débit Zigbee et le bouton BOOT est verrouillé.
-- Une fois l'image vérifiée à 100 %, l'ESP32-C6 redémarre automatiquement sur la nouvelle partition.
+### Installer la mise à jour OTA dans Home Assistant
+1. Rechargez l'intégration **ZHA** (**Paramètres → Appareils et services → ZHA → ⋮ → Recharger**) pour rafraîchir le manifeste `index.json` depuis GitHub Releases.
+2. Sur la fiche de l'appareil **`Atlantic-Siemens ZB-BSB`**, l'entité **Micrologiciel** (`update`) passe automatiquement à **Mise à jour disponible** — cliquez simplement sur **Installer** (ou appelez l'action `update.install` dans **Outils de développement → Actions**) :
+   ```yaml
+   action: update.install
+   target:
+     entity_id: update.atlantic_siemens_zb_bsb_micrologiciel
+   ```
+3. Pendant le téléchargement OTA, la barre de progression s'affiche en direct dans Home Assistant, la LED du XIAO clignote rapidement (`200 ms`), les rapports périodiques de capteurs sont suspendus pour maximiser le débit Zigbee et le bouton BOOT est verrouillé.
+4. Une fois l'image vérifiée à 100 %, l'ESP32-C6 redémarre automatiquement sur la nouvelle partition.
 
 ---
 

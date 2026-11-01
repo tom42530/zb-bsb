@@ -1,5 +1,7 @@
 #include "zb_bridge.h"
 #include "board_config.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_timer.h"
@@ -524,9 +526,9 @@ void ZbBridge::build_endpoints(esp_zb_ep_list_t* ep_list) {
     }
 
     // ------------------------------------------------------------------------
-    // ENDPOINT 7 : Appoint Électrique + Sonde Ambiance BSB Zone 1 (si présente)
+    // ENDPOINT 7 : Appoint Électrique + Sonde Ambiance BSB Zone 1 + Switch Antenne Externe
     // ------------------------------------------------------------------------
-    if (caps_.has_backup_heater || caps_.has_backup_mod || caps_.zone1.has_room_sensor) {
+    {
         esp_zb_cluster_list_t* cl = esp_zb_zcl_cluster_list_create();
         add_basic_and_identify_clusters(cl, caps_.controller_model, false);
 
@@ -540,6 +542,12 @@ void ZbBridge::build_endpoints(esp_zb_ep_list_t* ep_list) {
             add_temp_measurement_cluster(cl, caps_.zone1.initial_room_c, 0.0f, 45.0f);
         }
 
+        // Commutateur d'antenne RF Zigbee du XIAO ESP32-C6 (OFF = Céramique interne par défaut, ON = U.FL externe)
+        esp_zb_on_off_cluster_cfg_t ant_on_off_cfg = {
+            .on_off = ext_antenna_enabled_,
+        };
+        esp_zb_cluster_list_add_on_off_cluster(cl, esp_zb_on_off_cluster_create(&ant_on_off_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
         esp_zb_endpoint_config_t ep_cfg = {
             .endpoint           = EP_BACKUP_AUX,
             .app_profile_id     = ESP_ZB_AF_HA_PROFILE_ID,
@@ -547,7 +555,8 @@ void ZbBridge::build_endpoints(esp_zb_ep_list_t* ep_list) {
             .app_device_version = 0,
         };
         esp_zb_ep_list_add_ep(ep_list, cl, ep_cfg);
-        ESP_LOGI(TAG, "Endpoint %u enregistre (Appoint Electrique & Auxiliaires)", EP_BACKUP_AUX);
+        ESP_LOGI(TAG, "Endpoint %u enregistre (Appoint Electrique, Auxiliaires & Switch Antenne RF=%s)",
+                 EP_BACKUP_AUX, ext_antenna_enabled_ ? "ON (Externe U.FL)" : "OFF (Interne Ceramique)");
     }
 }
 
@@ -593,9 +602,50 @@ static void zigbee_main_task(void* pvParameters) {
     esp_zb_stack_main_loop();
 }
 
+bool ZbBridge::load_external_antenna_nvs() {
+    nvs_handle_t nvs_h = 0;
+    uint8_t val = 0; // Par défaut : OFF (0 = antenne céramique interne)
+    if (nvs_open("bsb_topo", NVS_READONLY, &nvs_h) == ESP_OK) {
+        nvs_get_u8(nvs_h, "ext_ant", &val);
+        nvs_close(nvs_h);
+    }
+    return (val != 0);
+}
+
+void ZbBridge::set_external_antenna_enabled(bool enabled) {
+    ext_antenna_enabled_ = enabled;
+    board::set_xiao_rf_antenna(enabled);
+
+    nvs_handle_t nvs_h = 0;
+    if (nvs_open("bsb_topo", NVS_READWRITE, &nvs_h) == ESP_OK) {
+        nvs_set_u8(nvs_h, "ext_ant", enabled ? 1 : 0);
+        nvs_commit(nvs_h);
+        nvs_close(nvs_h);
+    }
+
+    ESP_LOGI(TAG, "[Zigbee->RF] Commutateur d'antenne RF XIAO ESP32-C6 -> %s (sauvegarde en NVS)",
+             enabled ? "ON (Antenne Externe U.FL)" : "OFF (Antenne Interne Ceramique)");
+
+    if (stack_initialized_) {
+        uint8_t on_val = enabled ? 1 : 0;
+        if (esp_zb_lock_acquire(pdMS_TO_TICKS(200))) {
+            esp_zb_zcl_set_attribute_val(EP_BACKUP_AUX,
+                                         ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                                         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                         ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+                                         &on_val,
+                                         false);
+            esp_zb_lock_release();
+        }
+        report_attr(EP_BACKUP_AUX, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID);
+    }
+}
+
 bool ZbBridge::begin(const bsb::BsbCapabilities& caps, bsb::BsbBus* bus, bool erase_zigbee_nvram) {
-    caps_ = caps;
-    bus_  = bus;
+    caps_                = caps;
+    bus_                 = bus;
+    ext_antenna_enabled_ = load_external_antenna_nvs();
+    board::set_xiao_rf_antenna(ext_antenna_enabled_);
 
     esp_zb_platform_config_t platform_config = {};
     platform_config.radio_config.radio_mode          = ZB_RADIO_MODE_NATIVE;
@@ -651,6 +701,16 @@ void ZbBridge::handle_stack_signal(esp_zb_app_signal_t* signal_struct) {
                     connected_ = true;
                     ESP_LOGI(TAG, "Reconnecte au reseau Zigbee (PAN=0x%04X, Canal=%u, Addr=0x%04X)",
                              esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
+                    {
+                        uint8_t on_val = ext_antenna_enabled_ ? 1 : 0;
+                        esp_zb_zcl_set_attribute_val(EP_BACKUP_AUX,
+                                                     ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                     ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+                                                     &on_val,
+                                                     false);
+                    }
+                    report_attr(EP_BACKUP_AUX, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID);
                     request_ota_update();
                 }
             } else {
@@ -664,6 +724,16 @@ void ZbBridge::handle_stack_signal(esp_zb_app_signal_t* signal_struct) {
                 connected_ = true;
                 ESP_LOGI(TAG, "Appairage Zigbee reussi ! (PAN=0x%04X, Canal=%u, Addr=0x%04X)",
                          esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
+                {
+                    uint8_t on_val = ext_antenna_enabled_ ? 1 : 0;
+                    esp_zb_zcl_set_attribute_val(EP_BACKUP_AUX,
+                                                 ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
+                                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                                 ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
+                                                 &on_val,
+                                                 false);
+                }
+                report_attr(EP_BACKUP_AUX, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF, ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID);
                 request_ota_update();
             } else {
                 connected_ = false;
@@ -913,16 +983,21 @@ esp_err_t ZbBridge::handle_attribute_write(const esp_zb_zcl_set_attr_value_messa
         }
     }
 
-    // 3. Cluster OnOff (0x0006) sur EP 6 — Activation Marche/Arrêt Ballon ECS (1600)
+    // 3. Cluster OnOff (0x0006) :
+    //    - EP 6 : Activation Marche/Arrêt Ballon ECS (1600)
+    //    - EP 7 : Sélection Antenne RF Zigbee Externe U.FL (OFF par défaut = Céramique interne, ON = U.FL externe)
     else if (cluster_id == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF &&
-             attr_id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID &&
-             ep == EP_DHW) {
+             attr_id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
         bool on = *static_cast<const bool*>(data_ptr);
-        uint8_t dhw_mode = on ? static_cast<uint8_t>(bsb::DhwMode::On) : static_cast<uint8_t>(bsb::DhwMode::Off);
-        ESP_LOGI(TAG, "[Zigbee->BSB] Mode Ballon ECS -> %s (%u)", on ? "Marche" : "Arret", dhw_mode);
-        bus_->enqueue_set_uint8(bsb::fields::DHW_MODE, dhw_mode);
-        set_thermostat_u8_attr(EP_DHW, ESP_ZB_ZCL_ATTR_THERMOSTAT_SYSTEM_MODE_ID,
-                               on ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+        if (ep == EP_DHW) {
+            uint8_t dhw_mode = on ? static_cast<uint8_t>(bsb::DhwMode::On) : static_cast<uint8_t>(bsb::DhwMode::Off);
+            ESP_LOGI(TAG, "[Zigbee->BSB] Mode Ballon ECS -> %s (%u)", on ? "Marche" : "Arret", dhw_mode);
+            bus_->enqueue_set_uint8(bsb::fields::DHW_MODE, dhw_mode);
+            set_thermostat_u8_attr(EP_DHW, ESP_ZB_ZCL_ATTR_THERMOSTAT_SYSTEM_MODE_ID,
+                                   on ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+        } else if (ep == EP_BACKUP_AUX) {
+            set_external_antenna_enabled(on);
+        }
     }
 
     return ESP_OK;

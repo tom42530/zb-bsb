@@ -26,8 +26,9 @@
      - Smart detection of physically wired sensors through **sentinel value filtering** (`50.0 °C` returned when a zone has no wired room sensor, `0.0 °C` when a zone has no dedicated flow sensor, or status byte `flag_byte != 0x00`).
      - Presence of a **Domestic Hot Water (DHW) Tank** and an **Electric Backup Heater**.
    - The discovered topology is saved in non-volatile memory (**NVS**): subsequent reboots are instantaneous, and **only the Zigbee Endpoints/Clusters matching physically present components** are exposed to the coordinator.
-4. **High-Power Zigbee 3.0 Router (`+20 dBm`)**:
-   - Continuously powered near the heat pump, the ESP32-C6 operates as a **Zigbee Router (`ZCZR`)** with its transmit power set to **`+20 dBm`** and its onboard RF antenna switch configured automatically, strengthening your home Zigbee mesh (garage, utility room, basement).
+4. **High-Power Zigbee 3.0 Router (`+20 dBm`) & Dynamic External Antenna Switch**:
+   - Continuously powered near the heat pump, the ESP32-C6 operates as a **Zigbee Router (`ZCZR`)** with its transmit power set to **`+20 dBm`**, strengthening your home Zigbee mesh (garage, utility room, basement).
+   - **Runtime RF Antenna Selection**: exposes a dedicated Zigbee `switch` on **Endpoint 7** allowing you to toggle at runtime between the onboard SMD ceramic antenna (**OFF**, default) and an external antenna on the **U.FL** connector (**ON**) without recompiling the firmware (persisted in NVS).
 
 ---
 
@@ -107,10 +108,10 @@ The BSB bus (`CL+` / `CL-`) uses low-speed differential signaling with inverted 
 | **Power Supply** | **`5V` / `GND`** | — | Continuous 5V power supply (`>= 250 mA` recommended, enables **Zigbee 3.0 Router** role) |
 | **Status LED** | *Internal* | `GPIO15` | Programmable yellow LED:<br>• **Regular blink (500 ms)**: Searching / pairing Zigbee network<br>• **Solid ON**: Joined and connected to the Zigbee network<br>• **Fast blink (120 ms)**: Button held 3 to 8s (BSB Re-scan)<br>• **Strobe blink (50 ms)**: Button held > 8s (Zigbee Factory Reset) |
 | **`BOOT` Button** | *Internal* | `GPIO9` | • Hold **3 to 8 s**: Triggers a full **BSB Auto-Discovery** scan<br>• Hold **> 8 s**: **Zigbee Factory Reset** + NVS erase + Reboot |
-| **RF Antenna Switch** | *Internal* | `GPIO3` / `GPIO14` | `FM8625H` RF switch driven automatically (`GPIO3=LOW`, `GPIO14=LOW` for onboard ceramic antenna) |
+| **RF Antenna Switch** | *Internal* | `GPIO3` / `GPIO14` | `FM8625H` RF switch controllable dynamically from Home Assistant (**OFF** by default = onboard ceramic antenna, **ON** = external U.FL antenna, persisted in NVS) |
 
-> [!IMPORTANT]
-> To use an external antenna connected to the **U.FL** connector of the XIAO ESP32-C6 instead of the onboard SMD ceramic antenna, pass `zb_bsb::board::init_xiao_rf_antenna(true);` in [`src/main.cpp`](src/main.cpp).
+> [!TIP]
+> You can switch between the onboard SMD ceramic antenna (**OFF**, default) and an external antenna connected to the **U.FL** connector (**ON**) directly from Home Assistant using the **Endpoint 7 `OnOff` Switch** without recompiling the firmware. The choice is saved in NVS across reboots and OTA updates.
 
 ---
 
@@ -152,7 +153,7 @@ On first boot, **ZB-BSB** queries the heat pump and activates only the Endpoints
 | **EP 4** | **If HP Return Hydraulics or Zone 2 present** | • `TemperatureMeasurement` (`0x0402`): **HP Return Temp. (`8410`)**<br>• `AnalogInput` (`0x000C`): **Zone 1 Status Code (`8000`)**<br>• `AnalogOutput` (`0x000D`): **Zone 2 External Temp. Sensor (`0–35 °C`)** | • Sensor **HP Return Temperature (°C)**<br>• Sensor **Zone 1 Status Code (`8000`)**<br>• Number **Zone 2 External Temp. Sensor (°C)** |
 | **EP 5** | **If Zone Flow Sensor (`8773`/`8743`) present** | • `TemperatureMeasurement` (`0x0402`): **Zone Flow Temp. (`8773` / `8743`)**<br>• `AnalogInput` (`0x000C`): **Zone 2 Active Setpoint (`8771`)** | • Sensor **Zone Flow Temperature (°C)**<br>• Sensor **Zone 2 Active Setpoint (°C)** |
 | **EP 6** | **If DHW Tank (`8830`/`1610`) present** | • `Thermostat` (`0x0201`): **DHW Tank Thermostat** (Mode `Off`/`Heat`, Nominal setpoint `1610` 30–65 °C, Reduced setpoint `1612`, Active heating state `8003`)<br>• `TemperatureMeasurement` (`0x0402`): **DHW Tank Temp. (`8830`)**<br>• `AnalogOutput` (`0x000D`): **DHW Setpoint (`1610`)**<br>• `OnOff` (`0x0006`): **DHW On/Off Switch (`1600`)**<br>• `AnalogInput` (`0x000C`): **DHW Status Code (`8003`)** | • Climate **DHW Tank Thermostat (30–65 °C)**<br>• Sensor **DHW Tank Temperature (°C)**<br>• Number **DHW Setpoint (30–65 °C)**<br>• Switch **DHW On/Off**<br>• Sensor **DHW Status Code (`8003`)** |
-| **EP 7** | **If Electric Backup Heater (`8402`) present** | • `BinaryInput` (`0x000F`): **Electric Backup Heater State (`8402`)**<br>• `AnalogInput` (`0x000C`): **Backup Heater Modulation % (`8414`)**<br>• `TemperatureMeasurement` (`0x0402`): **Zone 1 Room Temp. (`8740`)** *(if wired BSB sensor present)* | • Binary Sensor **Electric Backup Heater**<br>• Sensor **Backup Heater Modulation (%)**<br>• Sensor **Zone 1 Room Temperature (°C)** *(if wired)* |
+| **EP 7** | **Always active** (Auxiliaries & RF Antenna Switch) | • `BinaryInput` (`0x000F`): **Electric Backup Heater State (`8402`)**<br>• `AnalogInput` (`0x000C`): **Backup Heater Modulation % (`8414`)**<br>• `TemperatureMeasurement` (`0x0402`): **Zone 1 Room Temp. (`8740`)** *(if wired BSB sensor present)*<br>• `OnOff` (`0x0006`): **External U.FL Zigbee Antenna Switch (`GPIO14`)** | • Binary Sensor **Electric Backup Heater**<br>• Sensor **Backup Heater Modulation (%)**<br>• Sensor **Zone 1 Room Temperature (°C)** *(if wired)*<br>• Switch **External U.FL Zigbee Antenna** (`OFF` by default) |
 
 ---
 
@@ -250,16 +251,16 @@ The GitHub Actions workflow [`.github/workflows/ci.yml`](.github/workflows/ci.ym
    ```
 3. Upload `ota/index.json` and `ota/zb_bsb_v01020000.ota` to your HTTP/HTTPS web server and set `url: https://ota.my-domain.org/zb-bsb/index.json` in `extra_providers`.
 
-### Trigger the OTA update immediately with `zha_toolkit`
-In Home Assistant (**Developer Tools → Actions**), call `zha_toolkit.ota_notify`:
-```yaml
-action: zha_toolkit.ota_notify
-data:
-  ieee: 10:bd:a3:ff:fe:a1:83:28
-```
-- ZHA refreshes your `index.json` provider (from GitHub Releases or your custom server), downloads the `.ota` image, and sends an `Image Notify` command to the XIAO ESP32-C6.
-- During the OTA transfer, the XIAO status LED blinks rapidly (`200 ms`), spontaneous sensor reporting is paused to maximize Zigbee transfer throughput, and the BOOT button is locked.
-- Once 100% of the image is verified, the ESP32-C6 reboots into the new partition automatically.
+### Installing the OTA update in Home Assistant
+1. Reload the **ZHA** integration (**Settings → Devices & services → ZHA → ⋮ → Reload**) so ZHA refreshes the remote `index.json` manifest from GitHub Releases.
+2. On the **`Atlantic-Siemens ZB-BSB`** device page, the **Firmware** (`update`) entity automatically switches to **Update available** — simply click **Install** (or call `update.install` in **Developer Tools → Actions**):
+   ```yaml
+   action: update.install
+   target:
+     entity_id: update.atlantic_siemens_zb_bsb_micrologiciel
+   ```
+3. During the OTA transfer, a live progress bar is shown in Home Assistant, the XIAO status LED blinks rapidly (`200 ms`), spontaneous sensor reporting is paused to maximize Zigbee transfer throughput, and the BOOT button is locked.
+4. Once 100% of the image is verified, the ESP32-C6 reboots into the new partition automatically.
 
 ---
 

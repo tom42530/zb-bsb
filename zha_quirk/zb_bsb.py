@@ -29,7 +29,7 @@ from zhaquirks.builder import (
     EntityType,
     QuirkBuilder,
 )
-from zigpy.zcl.clusters.general import AnalogInput
+from zigpy.zcl.clusters.general import AnalogInput, OnOff
 from zigpy.zcl.clusters.hvac import (
     SystemMode,
     Thermostat as ThermostatCluster,
@@ -178,6 +178,8 @@ class DhwStatusEnum(RobustIntEnum):
         translation_key="code_statut_ecs",
         fallback_name="Code Statut ECS",
     )
+    # Commutateur d'antenne Zigbee externe U.FL sur Endpoint 7 (OFF par défaut = céramique interne)
+    .adds(OnOff.cluster_id, endpoint_id=7)
     .add_to_registry()
 )
 

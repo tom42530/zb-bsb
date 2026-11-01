@@ -240,6 +240,12 @@ const definition = {
             powerOnBehavior: false,
             description: 'Activation production Eau Chaude Sanitaire (1600)',
         }),
+        // Switch Antenne RF Zigbee Externe U.FL sur Endpoint 7 (OFF par défaut = Céramique interne)
+        m.onOff({
+            endpointNames: ['aux'],
+            powerOnBehavior: false,
+            description: 'Activation Antenne Zigbee Externe U.FL (OFF = Céramique interne, ON = U.FL externe)',
+        }),
     ],
     exposes: [
         e.numeric('compressor_modulation', ea.STATE).withUnit('%').withDescription('Modulation du compresseur (8413)'),

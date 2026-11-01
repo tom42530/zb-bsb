@@ -89,6 +89,7 @@ static void check_boot_button() {
         if (held_ms >= 8000) {
             ESP_LOGW(TAG, "Appui tres long (>8s) : Reset Usine Zigbee + Effacement topologie BSB...");
             zb_bsb::board::set_status_led(false);
+            zb_bsb::ZbBridge::instance().set_external_antenna_enabled(false);
             bsb::BsbDiscovery::clear_nvs();
             esp_zb_factory_reset();
             delay(500);
@@ -145,12 +146,15 @@ void setup() {
              running_part ? running_part->label : "n/a");
     ESP_LOGI(TAG, "==========================================================");
 
-    // 1. Initialisation matérielle du XIAO ESP32-C6 (Commutateur RF + GPIO)
-    zb_bsb::board::init_xiao_rf_antenna(false); // Antenne céramique interne par défaut
-    zb_bsb::board::init_user_io();
-
-    // 2. Initialisation de la flash NVS
+    // 1. Initialisation de la flash NVS
     init_nvs();
+
+    // 2. Initialisation matérielle du XIAO ESP32-C6 (Commutateur RF persisté en NVS + GPIO)
+    // Par défaut : OFF (false = Antenne céramique SMD intégrée)
+    const bool use_ext_ant = zb_bsb::ZbBridge::load_external_antenna_nvs();
+    zb_bsb::board::init_xiao_rf_antenna(use_ext_ant);
+    zb_bsb::board::init_user_io();
+    ESP_LOGI(TAG, "  Antenne RF : %s", use_ext_ant ? "ON (Externe U.FL)" : "OFF (Ceramique interne par defaut)");
 
     // 3. Initialisation du bus BSB matériel (UART1 : RX=GPIO17/D7, TX=GPIO16/D6, 4800 8O1)
     bsb::BsbBus::Config bus_cfg = {};

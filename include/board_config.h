@@ -67,6 +67,18 @@ static constexpr gpio_num_t PIN_RF_SWITCH_EN  = GPIO_NUM_3;
 static constexpr gpio_num_t PIN_RF_SWITCH_SEL = GPIO_NUM_14;
 
 /**
+ * @brief Bascule à chaud le commutateur d'antenne RF du Seeed Studio XIAO ESP32-C6.
+ * @param use_external_antenna false = antenne céramique SMD intégrée (par défaut),
+ *                             true  = connecteur U.FL externe.
+ */
+inline void set_xiao_rf_antenna(bool use_external_antenna) {
+    // Activer la puce RF switch (GPIO3 = LOW)
+    gpio_set_level(PIN_RF_SWITCH_EN, 0);
+    // Sélectionner l'antenne (0 = céramique interne, 1 = U.FL externe)
+    gpio_set_level(PIN_RF_SWITCH_SEL, use_external_antenna ? 1 : 0);
+}
+
+/**
  * @brief Configure le commutateur d'antenne RF du Seeed Studio XIAO ESP32-C6.
  * @param use_external_antenna false = antenne céramique SMD intégrée (par défaut),
  *                             true  = connecteur U.FL externe.
@@ -80,10 +92,7 @@ inline void init_xiao_rf_antenna(bool use_external_antenna = false) {
     io_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
     gpio_config(&io_conf);
 
-    // Activer la puce RF switch (GPIO3 = LOW)
-    gpio_set_level(PIN_RF_SWITCH_EN, 0);
-    // Sélectionner l'antenne (0 = céramique interne, 1 = U.FL externe)
-    gpio_set_level(PIN_RF_SWITCH_SEL, use_external_antenna ? 1 : 0);
+    set_xiao_rf_antenna(use_external_antenna);
 }
 
 /**
