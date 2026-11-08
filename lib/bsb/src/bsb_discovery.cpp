@@ -1,5 +1,6 @@
 #if defined(ESP_PLATFORM)
 
+#include <Arduino.h>
 #include "bsb_discovery.h"
 #include "nvs_flash.h"
 #include "nvs.h"

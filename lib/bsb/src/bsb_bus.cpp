@@ -1,8 +1,10 @@
 #if defined(ESP_PLATFORM)
 
+#include <Arduino.h>
 #include "bsb_bus.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include <cstdio>
 #include <cstring>
 
 namespace bsb {
@@ -33,11 +35,118 @@ uint64_t BsbBus::now_ms() {
     return static_cast<uint64_t>(esp_timer_get_time() / 1000ULL);
 }
 
+int64_t g_tx_early_release_us = 65;
+
+static bool send_wire_bytes_compensated(int tx_pin, int rx_pin, const uint8_t* wire_bytes, size_t len, int64_t early_release_us) {
+    // Vérification matérielle instantanée (CSMA) juste avant le bit de Start :
+    // si le bus est déjà tiré à l'état bas par un autre maître (0x0A), on annule l'émission.
+    if (digitalRead(rx_pin) == LOW) {
+        return false;
+    }
+
+    uint8_t bits[BsbFrame::MAX_FRAME_LEN * 11 + 2];
+    size_t nbits = 0;
+    for (size_t i = 0; i < len; ++i) {
+        const uint8_t b = wire_bytes[i];
+        bits[nbits++] = 0; // Start bit (LOW)
+        uint8_t ones = 0;
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            uint8_t v = (b >> bit) & 0x01;
+            bits[nbits++] = v;
+            ones += v;
+        }
+        // Parité IMPAIRE (Odd)
+        bits[nbits++] = (ones & 0x01) ? 0 : 1;
+        bits[nbits++] = 1; // Stop bit (HIGH)
+    }
+    bits[nbits] = 1;
+
+    portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+    portENTER_CRITICAL(&mux);
+    if (digitalRead(rx_pin) == LOW) {
+        portEXIT_CRITICAL(&mux);
+        return false;
+    }
+    const int64_t t_start = esp_timer_get_time();
+    for (size_t i = 0; i < nbits; ++i) {
+        const int64_t bit_start_us = t_start + static_cast<int64_t>((i * 20833ULL) / 100ULL);
+        const int64_t bit_end_us   = t_start + static_cast<int64_t>(((i + 1) * 20833ULL) / 100ULL);
+
+        while (esp_timer_get_time() < bit_start_us) {}
+        digitalWrite(tx_pin, bits[i] ? HIGH : LOW);
+
+        if (bits[i] == 0 && bits[i + 1] == 1 && early_release_us > 0) {
+            const int64_t release_us = bit_end_us - early_release_us;
+            while (esp_timer_get_time() < release_us) {}
+            digitalWrite(tx_pin, HIGH);
+        }
+    }
+    const int64_t frame_end_us = t_start + static_cast<int64_t>((nbits * 20833ULL) / 100ULL);
+    while (esp_timer_get_time() < frame_end_us) {}
+    digitalWrite(tx_pin, HIGH);
+    portEXIT_CRITICAL(&mux);
+    return true;
+}
+
 bool BsbBus::begin(const Config& cfg) {
     cfg_ = cfg;
     if (!mutex_) {
         mutex_ = xSemaphoreCreateMutex();
     }
+
+    // --- Auto-calibration 1 µs du temps de stockage optocoupleur (U3 + T1) au démarrage ---
+    pinMode(cfg_.tx_pin, OUTPUT);
+    digitalWrite(cfg_.tx_pin, HIGH);
+    pinMode(cfg_.rx_pin, INPUT_PULLUP);
+    delay(20);
+
+    uint64_t wait_idle_start = esp_timer_get_time();
+    while ((esp_timer_get_time() - wait_idle_start) < 200000ULL) {
+        if (digitalRead(cfg_.rx_pin) == LOW) {
+            wait_idle_start = esp_timer_get_time();
+        }
+        if ((esp_timer_get_time() - wait_idle_start) >= 5000ULL) {
+            break;
+        }
+    }
+
+    const int64_t t0 = esp_timer_get_time();
+    digitalWrite(cfg_.tx_pin, LOW);
+    int64_t t_fall = -1;
+    while ((esp_timer_get_time() - t0) < 208) {
+        if (t_fall < 0 && digitalRead(cfg_.rx_pin) == LOW) {
+            t_fall = esp_timer_get_time() - t0;
+        }
+    }
+    const int64_t t1 = esp_timer_get_time();
+    digitalWrite(cfg_.tx_pin, HIGH);
+    int64_t t_rise = -1;
+    while ((esp_timer_get_time() - t1) < 2000) {
+        if (t_fall < 0 && digitalRead(cfg_.rx_pin) == LOW) {
+            t_fall = esp_timer_get_time() - t0;
+        }
+        if (t_fall >= 0 && digitalRead(cfg_.rx_pin) == HIGH) {
+            t_rise = esp_timer_get_time() - t1;
+            break;
+        }
+    }
+
+    if (t_fall >= 0 && t_rise > t_fall) {
+        int64_t stretch_us = t_rise - t_fall;
+        // On compense ~80% de l'étirement mesuré (ex: 82 us * 0.8 = 65 us), borné entre 0 et 95 us
+        int64_t calc_comp = (stretch_us * 80) / 100;
+        if (calc_comp < 0) calc_comp = 0;
+        if (calc_comp > 95) calc_comp = 95;
+        g_tx_early_release_us = calc_comp;
+    } else {
+        g_tx_early_release_us = 65;
+    }
+
+    ESP_LOGI(TAG, "[OSCILLO BSB] Calibration TX : t_ON=%lld us | t_OFF=%lld us -> pre-compensation appliquee = -%lld us",
+             static_cast<long long>(t_fall),
+             static_cast<long long>(t_rise),
+             static_cast<long long>(g_tx_early_release_us));
+    delay(15);
 
     uart_config_t uart_cfg = {};
     uart_cfg.baud_rate  = cfg_.baud_rate;
@@ -59,11 +168,14 @@ bool BsbBus::begin(const Config& cfg) {
         return false;
     }
 
-    err = uart_set_pin(cfg_.uart_port, cfg_.tx_pin, cfg_.rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    // On ne connecte que RX à l'UART1 matériel ; TX (GPIO16) est piloté avec pré-compensation microseconde
+    err = uart_set_pin(cfg_.uart_port, UART_PIN_NO_CHANGE, cfg_.rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Echec uart_set_pin (TX=%d, RX=%d): %s", cfg_.tx_pin, cfg_.rx_pin, esp_err_to_name(err));
         return false;
     }
+    pinMode(cfg_.tx_pin, OUTPUT);
+    digitalWrite(cfg_.tx_pin, HIGH);
 
     uart_flush_input(cfg_.uart_port);
     parser_.reset();
@@ -95,6 +207,12 @@ void BsbBus::process_incoming_bytes(BsbFrame* match_frame, uint32_t wait_field_i
             if (frame.src_addr == cfg_.src_addr &&
                 (frame.command == Command::Get || frame.command == Command::Set || frame.command == Command::Inf)) {
                 continue;
+            }
+
+            if (frame.src_addr == 0x00 && frame.dst_addr == cfg_.src_addr) {
+                char dbg[96] = {0};
+                frame.format_debug(dbg, sizeof(dbg));
+                ESP_LOGI(TAG, "[RX PAC ] <- %s (%s)", dbg, get_field_name(frame.field_id));
             }
 
             // Si un autre maître (ex: 0x0A Cozytouch) vient d'émettre un GET ou SET,
@@ -208,12 +326,14 @@ bool BsbBus::send_frame_raw(const BsbFrame& frame) {
         wire_bytes[i] = static_cast<uint8_t>(frame.raw[i] ^ 0xFF);
     }
 
-    int written = uart_write_bytes(cfg_.uart_port, wire_bytes, frame.raw_len);
-    uart_wait_tx_done(cfg_.uart_port, pdMS_TO_TICKS(100));
+    if (!send_wire_bytes_compensated(cfg_.tx_pin, cfg_.rx_pin, wire_bytes, frame.raw_len, g_tx_early_release_us)) {
+        collision_avoided_count_++;
+        return false;
+    }
 
     last_tx_ms_ = now_ms();
     tx_count_++;
-    return (written == frame.raw_len);
+    return true;
 }
 
 bool BsbBus::query_sync(uint32_t field_id,

@@ -127,6 +127,7 @@ void setup() {
     Serial.begin(115200);
     // Redirige tous les logs ESP-IDF (ESP_LOGI, ESP_LOGW, etc.) vers la console USB CDC
     Serial.setDebugOutput(true);
+    esp_log_level_set("*", ESP_LOG_INFO);
 
     // Attente brève (jusqu'à 2.5s) que le moniteur série USB du PC s'ouvre après le flash
     const uint32_t usb_wait_start = millis();

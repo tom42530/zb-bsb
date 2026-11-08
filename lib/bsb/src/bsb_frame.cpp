@@ -1,3 +1,7 @@
+#if defined(ESP_PLATFORM)
+#include <Arduino.h>
+#include "esp_log.h"
+#endif
 #include "bsb_frame.h"
 #include <cmath>
 #include <cstdio>
@@ -391,6 +395,12 @@ bool BsbFrameParser::feed(uint8_t byte, BsbFrame& out_frame) {
             const bool crc_ok = (calc_crc == working_.crc);
             if (crc_ok) {
                 out_frame = working_;
+            } else {
+#if defined(ESP_PLATFORM)
+                ESP_LOGW("bsb.frame", "[CRC ERR] src=0x%02X dst=0x%02X cmd=0x%02X len=%u calc=0x%04X != rx=0x%04X",
+                         working_.src_addr, working_.dst_addr, static_cast<unsigned>(working_.command),
+                         working_.raw_len, calc_crc, working_.crc);
+#endif
             }
             reset();
             return crc_ok;

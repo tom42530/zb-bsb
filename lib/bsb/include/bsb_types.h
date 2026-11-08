@@ -74,7 +74,7 @@ namespace fields {
     static constexpr uint32_t Z2_STATUS_CODE       = 0x053D07A5; // Prog 8001 : Code état Circuit Chauffage 2
 
     // --- Eau Chaude Sanitaire (ECS / DHW) ---
-    static constexpr uint32_t DHW_MODE             = 0x313D0574; // Prog 1600 : Mode ECS (0=Arrêt, 1=Marche, 2=Eco)
+    static constexpr uint32_t DHW_MODE             = 0x31050573; // Prog 1600 : Mode ECS sur RVS21 (0=Arrêt, 1=Marche, 2=Eco)
     static constexpr uint32_t DHW_NOMINAL_SETPOINT = 0x313D06B9; // Prog 1610 : Consigne nominale ECS (°C)
     static constexpr uint32_t DHW_REDUCED_SETPOINT = 0x313D06BA; // Prog 1612 : Consigne réduite ECS (°C)
     static constexpr uint32_t DHW_TANK_TEMP        = 0x313D052F; // Prog 8830 : Température ballon ECS B3 (°C)
