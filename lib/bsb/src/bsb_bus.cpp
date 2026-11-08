@@ -12,9 +12,9 @@ namespace bsb {
 static const char* TAG = "bsb.bus";
 
 // Délai minimal de silence sur le bus avant d'émettre (évite de couper une trame 0x0A)
-static constexpr uint64_t BUS_IDLE_SILENCE_MS       = 65;
-// Garde supplémentaire lorsqu'un autre maître (ex: 0x0A Cozytouch) vient d'envoyer un GET
-static constexpr uint64_t OTHER_MASTER_GUARD_MS     = 130;
+static constexpr uint64_t BUS_IDLE_SILENCE_MS       = 80;
+// Garde supplémentaire lorsqu'un autre maître (ex: 0x0A Cozytouch) échange une rafale GET/RET
+static constexpr uint64_t OTHER_MASTER_GUARD_MS     = 190;
 // Cadence minimale entre deux requêtes de notre passerelle en régime établi
 static constexpr uint64_t MIN_INTER_QUERY_INTERVAL  = 750;
 // Timeout d'attente d'un RET ou ACK en mode asynchrone
@@ -38,10 +38,13 @@ uint64_t BsbBus::now_ms() {
 int64_t g_tx_early_release_us = 65;
 
 static bool send_wire_bytes_compensated(int tx_pin, int rx_pin, const uint8_t* wire_bytes, size_t len, int64_t early_release_us) {
-    // Vérification matérielle instantanée (CSMA) juste avant le bit de Start :
-    // si le bus est déjà tiré à l'état bas par un autre maître (0x0A), on annule l'émission.
-    if (digitalRead(rx_pin) == LOW) {
-        return false;
+    // 1. Écoute porteuse (Carrier Sense) pendant 2.5 ms (durée d'un caractère complet 11 bits à 4800 bauds) :
+    //    garantit qu'aucun autre maître (0x0A) n'est en train d'émettre un octet.
+    const int64_t cs_start = esp_timer_get_time();
+    while ((esp_timer_get_time() - cs_start) < 2500) {
+        if (digitalRead(rx_pin) == LOW) {
+            return false;
+        }
     }
 
     uint8_t bits[BsbFrame::MAX_FRAME_LEN * 11 + 2];
@@ -79,6 +82,17 @@ static bool send_wire_bytes_compensated(int tx_pin, int rx_pin, const uint8_t* w
             const int64_t release_us = bit_end_us - early_release_us;
             while (esp_timer_get_time() < release_us) {}
             digitalWrite(tx_pin, HIGH);
+        } else if (bits[i] == 1) {
+            // 2. Détection de collision en cours de bit '1' (CSMA/CD) :
+            //    Au milieu d'un bit récessif (HIGH), le bus doit être revenu à HIGH (1).
+            //    S'il est à LOW (0), un autre maître (0x0A) parle en même temps : on cède le bus immédiatement.
+            const int64_t sample_us = bit_start_us + 135;
+            while (esp_timer_get_time() < sample_us) {}
+            if (digitalRead(rx_pin) == LOW) {
+                digitalWrite(tx_pin, HIGH);
+                portEXIT_CRITICAL(&mux);
+                return false;
+            }
         }
     }
     const int64_t frame_end_us = t_start + static_cast<int64_t>((nbits * 20833ULL) / 100ULL);
@@ -177,6 +191,8 @@ bool BsbBus::begin(const Config& cfg) {
     pinMode(cfg_.tx_pin, OUTPUT);
     digitalWrite(cfg_.tx_pin, HIGH);
 
+    // Seuil FIFO RX à 1 octet pour être averti dès le 1er octet (0xDC) émis par 0x0A sur le bus
+    uart_set_rx_full_threshold(cfg_.uart_port, 1);
     uart_flush_input(cfg_.uart_port);
     parser_.reset();
     initialized_ = true;
@@ -215,12 +231,13 @@ void BsbBus::process_incoming_bytes(BsbFrame* match_frame, uint32_t wait_field_i
                 ESP_LOGI(TAG, "[RX PAC ] <- %s (%s)", dbg, get_field_name(frame.field_id));
             }
 
-            // Si un autre maître (ex: 0x0A Cozytouch) vient d'émettre un GET ou SET,
-            // on réserve le bus pendant 130 ms pour laisser le régulateur 0x00 lui répondre.
-            if (frame.src_addr != cfg_.src_addr &&
-                (frame.command == Command::Get || frame.command == Command::Set)) {
+            // Si un autre maître (ex: 0x0A Cozytouch) échange avec la PAC (GET/SET de 0x0A ou RET vers 0x0A),
+            // on réserve le bus pendant 190 ms car le Cozytouch envoie ses requêtes par rafales espacées de ~105 ms.
+            if (frame.src_addr != cfg_.src_addr && frame.dst_addr != cfg_.src_addr) {
                 bus_busy_until_ms_ = t_now + OTHER_MASTER_GUARD_MS;
-                collision_avoided_count_++;
+                if (frame.command == Command::Get || frame.command == Command::Set) {
+                    collision_avoided_count_++;
+                }
             }
 
             handle_received_frame(frame);
@@ -328,6 +345,7 @@ bool BsbBus::send_frame_raw(const BsbFrame& frame) {
 
     if (!send_wire_bytes_compensated(cfg_.tx_pin, cfg_.rx_pin, wire_bytes, frame.raw_len, g_tx_early_release_us)) {
         collision_avoided_count_++;
+        bus_busy_until_ms_ = now_ms() + OTHER_MASTER_GUARD_MS;
         return false;
     }
 
