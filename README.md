@@ -67,6 +67,8 @@ flowchart LR
 ```text
 zb-bsb/
 ├── platformio.ini                   # PlatformIO configuration (XIAO ESP32-C6 + native unit test environment)
+├── doc/
+│   └── screenshot/                  # Home Assistant integration screenshots (controls, sensors, diagnostics)
 ├── include/
 │   └── board_config.h               # XIAO ESP32-C6 hardware pinout (D7/D6, LED, BOOT button, RF switch)
 ├── lib/
@@ -199,6 +201,51 @@ As soon as a valid external temperature (`4.0 °C` to `38.0 °C`) is received fo
 1. Copy [`z2m/zb_bsb.js`](z2m/zb_bsb.js) into the `data/external_converters/` directory of your Zigbee2MQTT instance.
 2. Restart Zigbee2MQTT and enable **Permit Join**.
 3. In addition to all thermostats and sensors, the converter automatically translates numeric status codes (`8000`, `8001`, `8003`, `8006`) into descriptive text states.
+
+---
+
+## Home Assistant Device Overview
+
+Once paired via **ZHA** or **Zigbee2MQTT**, the **`Atlantic-Siemens ZB-BSB`** device card in Home Assistant organizes all discovered entities into three distinct sections: **Controls**, **Sensors**, and **Configuration & Diagnostic**.
+
+| Controls | Sensors | Configuration & Diagnostic |
+| :---: | :---: | :---: |
+| [![Controls](doc/screenshot/control.png)](doc/screenshot/control.png) | [![Sensors](doc/screenshot/sensor.png)](doc/screenshot/sensor.png) | [![Configuration & Diagnostic](doc/screenshot/diag.png)](doc/screenshot/diag.png) |
+
+### 1. Controls (`control.png`)
+* **Thermostats (Climate)**:
+  * **Zone 1 & Zone 2**: Independent heating zone thermostats with temperature setpoint adjustment and presets (*Comfort, Eco/Reduced, Auto, Frost Protection*).
+  * **Domestic Hot Water (DHW / Ballon ECS)**: Dedicated thermostat for DHW tank heating control (30–65 °C).
+* **Setpoints & Sliders**: Direct sliders for DHW target setpoint and reduced night setpoints for each zone.
+* **External Temperature Injection (`number`)**: Dedicated inputs to inject ambient temperature measurements from any room thermometer (Zigbee, Matter, BLE, Wi-Fi...) directly into the BSB bus.
+* **Hardware Switches**:
+  * **Production Ballon ECS**: Toggle DHW water heating on/off.
+  * **Antenne Zigbee Externe (U.FL)**: Switch dynamically between the onboard ceramic antenna and an external high-gain antenna connected to the U.FL port without reflashing.
+
+### 2. Sensors (`sensor.png`)
+* **Real-Time Temperatures**:
+  * **Outdoor Temperature** (`8700`), **HP Flow Temperature** (`8412`), and **HP Return Temperature** (`8410`).
+  * **Zone 2 Ambient Temperature** (`8770`) and **Zone 2 Flow Temperature** (`8773`).
+  * **DHW Tank Temperature** (`8830`).
+* **Operating States & Binary Sensors**:
+  * **HP Compressor** (`8400`), **Electric Backup Heater** (`8402`), **Main HP Circulator** (`8406`), and **Zone 2 Secondary Pump Q6** (`8760`).
+  * **HVAC Action**: Real-time operating state per zone (`idle`, `heating`).
+* **Power & Modulation**:
+  * **Compressor Modulation (%)** (`8413`) and **Backup Heater Modulation (%)** (`8414`).
+  * **Active Flow Setpoint** (`8771`) computed dynamically according to the heating curve.
+* **Raw BSB Status Codes**: Numeric status codes returned by the Siemens controller (`8000`, `8001`, `8003`, `8006`).
+
+### 3. Configuration & Diagnostic (`diag.png`)
+* **Zigbee OTA Firmware Updates in Live Progress**: Real-time status of OTA updates with interactive progress bar (e.g., `Installation en cours (40,17 %)`).
+* **Decoded Status Enums**: Human-readable translated states for all circuits:
+  * Heat Pump: e.g. `Chauffage_compresseur`
+  * DHW Tank: e.g. `Charge_temperature_atteinte`
+  * Heating Zones: e.g. `En_veille_pas_de_demande`, `Abaissement_reduit`
+* **Heat Demand (%)**: Calculated instantaneous heating demand per zone and PI loop demand.
+* **Zigbee RF Quality & Diagnostics**:
+  * Real-time **LQI** (Link Quality Indicator, up to 255) and **RSSI** signal strength (dBm).
+  * **Identify** button to trigger the onboard LED strobe for locating the device in technical cabinets.
+  * Minimum and maximum allowable temperature setpoint limits.
 
 ---
 

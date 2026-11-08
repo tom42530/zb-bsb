@@ -67,6 +67,8 @@ flowchart LR
 ```text
 zb-bsb/
 ├── platformio.ini                   # Configuration PlatformIO (XIAO ESP32-C6 + environnement de tests natifs)
+├── doc/
+│   └── screenshot/                  # Captures d'écran de l'intégration Home Assistant (contrôles, capteurs, diagnostic)
 ├── include/
 │   └── board_config.h               # Brochage matériel XIAO ESP32-C6 (D7/D6, LED, Bouton BOOT, Switch RF)
 ├── lib/
@@ -199,6 +201,51 @@ Dès qu'une température externe valide (`4.0 °C` à `38.0 °C`) est reçue pou
 1. Copiez le fichier [`z2m/zb_bsb.js`](z2m/zb_bsb.js) dans le dossier `data/external_converters/` de votre instance Zigbee2MQTT.
 2. Redémarrez Zigbee2MQTT et activez l'appairage (**Permit Join**).
 3. En plus de tous les thermostats et capteurs, le convertisseur traduit automatiquement les codes statut numériques (`8000`, `8001`, `8003`, `8006`) en états texte en français.
+
+---
+
+## Aperçu de l'Appareil dans Home Assistant
+
+Une fois appairé sous **ZHA** ou **Zigbee2MQTT**, la fiche de l'appareil **`Atlantic-Siemens ZB-BSB`** dans Home Assistant organise automatiquement toutes les entités découvertes au sein de trois cartes principales : **Contrôles**, **Capteurs** et **Configuration & Diagnostic**.
+
+| Contrôles | Capteurs | Configuration & Diagnostic |
+| :---: | :---: | :---: |
+| [![Contrôles](doc/screenshot/control.png)](doc/screenshot/control.png) | [![Capteurs](doc/screenshot/sensor.png)](doc/screenshot/sensor.png) | [![Configuration & Diagnostic](doc/screenshot/diag.png)](doc/screenshot/diag.png) |
+
+### 1. Carte Contrôles (`control.png`)
+* **Thermostats (Climate)** :
+  * **Zone 1 & Zone 2** : Pilotage indépendant des circuits de chauffage avec réglage des températures de consigne et sélection des modes (*Confort, Éco / Réduit, Auto, Hors-gel*).
+  * **Ballon ECS** : Entité thermostat dédiée pour le contrôle de l'eau chaude sanitaire (plage 30–65 °C).
+* **Consignes & Curseurs** : Curseurs interactifs pour régler rapidement la consigne nominale ECS ainsi que les consignes réduites de nuit pour chaque zone.
+* **Injection de Sondes Externes (`number`)** : Champs numériques permettant d'injecter la température ambiante de n'importe quel thermomètre domotique (Zigbee, Matter, BLE, Wi-Fi...) directement sur le bus BSB pour la compensation d'ambiance.
+* **Interrupteurs Matériels** :
+  * **Production Ballon ECS** : Activation ou coupure de la chauffe du ballon d'eau chaude sanitaire.
+  * **Antenne Zigbee Externe (U.FL)** : Bascule dynamique à chaud entre l'antenne céramique interne et une antenne externe à gain branchée sur le connecteur U.FL, sans recompiler ni flasher.
+
+### 2. Carte Capteurs (`sensor.png`)
+* **Températures en Temps Réel** :
+  * **Température Extérieure** (`8700`), **Départ PAC** (`8412`) et **Retour PAC** (`8410`).
+  * **Ambiance Zone 2** (`8770`) et **Départ d'eau Zone 2** (`8773`).
+  * **Température Ballon ECS** (`8830`).
+* **Organes de Chauffe & Capteurs Binaires** :
+  * État en direct du **Compresseur PAC** (`8400`), de l'**Appoint Électrique** (`8402`), du **Circulateur Principal PAC** (`8406`) et de la **Pompe Zone 2 Q6** (`8760`).
+  * **Action CVC** : Suivi de l'action active par zone (`idle`, `chauffage`).
+* **Niveaux de Modulation & Consignes** :
+  * **Modulation Compresseur (%)** (`8413`) et **Modulation Appoint (%)** (`8414`).
+  * **Consigne Active de Départ** (`8771`) calculée en temps réel selon la loi d'eau.
+* **Codes Statut Bruts BSB** : Valeurs numériques d'état transmises directement par le contrôleur Siemens (`8000`, `8001`, `8003`, `8006`).
+
+### 3. Carte Configuration & Diagnostic (`diag.png`)
+* **Mise à Jour Firmware Zigbee OTA en Direct** : Suivi en direct du téléversement et de l'installation du micrologiciel OTA avec barre de progression et pourcentage d'avancement (ex. `Installation en cours (40,17 %)`).
+* **Diagnostics Décodés en Clair** : Traduction textuelle immédiate des états internes du régulateur pour chaque circuit :
+  * Pompe à chaleur : ex. `Chauffage_compresseur`
+  * Ballon ECS : ex. `Charge_temperature_atteinte`
+  * Zones de chauffage : ex. `En_veille_pas_de_demande`, `Abaissement_reduit`
+* **Demandes de Chauffage (%)** : Pourcentage calculé en temps réel de la demande de chauffe par zone et de la régulation PI.
+* **Métriques Radio Zigbee & Maintenance** :
+  * **LQI** (qualité de liaison jusqu'à 255) et **RSSI** (force du signal en dBm) en direct.
+  * Bouton **Identifier** pour déclencher le clignotement stroboscopique de la LED du XIAO et repérer physiquement le boîtier.
+  * Limites de consigne minimale et maximale configurables.
 
 ---
 
