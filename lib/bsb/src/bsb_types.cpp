@@ -148,7 +148,11 @@ const char* get_dhw_status_text_fr(uint16_t code) {
         case 61:  return "Charge ECS forcee / Legionellose";
         case 63:  return "Charge ECS active (Chauffe en cours)";
         case 66:  return "Charge par appoint electrique";
+        case 67:  return "Charge ECS complementaire";
         case 69:  return "Post-circulation pompe ECS";
+        case 92:  return "Charge temperature legionellose";
+        case 93:  return "En charge par PAC";
+        case 94:  return "En charge par appoint electrique";
         case 96:  return "Charge prete";
         case 97:  return "En charge";
         case 98:  return "Charge refroidissement";

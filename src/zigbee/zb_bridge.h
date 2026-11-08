@@ -152,9 +152,22 @@ private:
     volatile bool        ota_in_progress_   = false;
 
     bool                 comp_running_        = false;
+    uint8_t              comp_mod_            = 0;
+    uint8_t              hp_status_code_      = 0;
     bool                 hp_pump_running_     = false;
     bool                 z1_pump_running_     = false;
     bool                 z2_pump_running_     = false;
+    uint8_t              z1_mode_             = 1;
+    uint8_t              z2_mode_             = 1;
+    uint8_t              z1_status_code_      = 0;
+    uint8_t              z2_status_code_      = 0;
+    uint8_t              dhw_status_code_     = 0;
+    int8_t               last_z1_heating_     = -1;
+    int8_t               last_z2_heating_     = -1;
+    int8_t               last_dhw_heating_    = -1;
+    int16_t              last_z1_demand_      = -1;
+    int16_t              last_z2_demand_      = -1;
+    int16_t              last_dhw_demand_     = -1;
     bool                 ext_antenna_enabled_ = false;
 
     ExternalSensorState  ext_sensor_z1_       = {};

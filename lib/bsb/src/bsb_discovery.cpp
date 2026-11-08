@@ -139,7 +139,8 @@ bool BsbDiscovery::scan_heat_pump(BsbBus& bus, BsbCapabilities& out_caps) {
         caps.has_compressor_mod = true;
     }
 
-    if (bus.query_sync(fields::HP_PUMP_STATE, val, ValueType::Binary, 3, 350) && val.valid) {
+    if (bus.query_sync(fields::HP_PUMP_STATE, val, ValueType::Binary, 3, 350) &&
+        val.valid && val.flag_byte == 0x00) {
         caps.has_hp_pump_state = true;
     }
 
@@ -328,9 +329,7 @@ void BsbDiscovery::register_discovered_polls(BsbBus& bus, const BsbCapabilities&
         bus.register_poll_field(fields::Z1_ACTIVE_SETPOINT,  45000);
         if (caps.zone1.has_room_sensor) bus.register_poll_field(fields::Z1_ROOM_TEMP,  20000);
         if (caps.zone1.has_flow_sensor) bus.register_poll_field(fields::Z1_FLOW_TEMP,  25000);
-        if (caps.zone1.has_pump_state && !caps.has_hp_pump_state) {
-            bus.register_poll_field(fields::Z1_PUMP_STATE, 25000);
-        }
+        if (caps.zone1.has_pump_state)  bus.register_poll_field(fields::Z1_PUMP_STATE, 25000);
         if (caps.zone1.has_status_code) bus.register_poll_field(fields::Z1_STATUS_CODE,45000);
     }
 

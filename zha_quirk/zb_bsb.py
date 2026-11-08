@@ -118,7 +118,11 @@ class DhwStatusEnum(RobustIntEnum):
     Charge_forcee_legionellose = 61
     Charge_ECS_active = 63
     Charge_appoint_electrique = 66
+    Charge_complementaire = 67
     Post_circulation_pompe_ECS = 69
+    Charge_legionellose_atteinte = 92
+    En_charge_PAC = 93
+    En_charge_appoint = 94
     Charge_prete = 96
     En_charge = 97
     Charge_refroidissement = 98

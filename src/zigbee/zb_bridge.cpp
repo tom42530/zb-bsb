@@ -644,6 +644,8 @@ void ZbBridge::set_external_antenna_enabled(bool enabled) {
 bool ZbBridge::begin(const bsb::BsbCapabilities& caps, bsb::BsbBus* bus, bool erase_zigbee_nvram) {
     caps_                = caps;
     bus_                 = bus;
+    z1_mode_             = caps.zone1.initial_mode;
+    z2_mode_             = caps.zone2.initial_mode;
     ext_antenna_enabled_ = load_external_antenna_nvs();
     board::set_xiao_rf_antenna(ext_antenna_enabled_);
 
@@ -948,9 +950,15 @@ esp_err_t ZbBridge::handle_attribute_write(const esp_zb_zcl_set_attr_value_messa
         } else if (attr_id == ESP_ZB_ZCL_ATTR_THERMOSTAT_SYSTEM_MODE_ID) {
             uint8_t zcl_mode = *static_cast<const uint8_t*>(data_ptr);
             uint8_t bsb_mode = zcl_system_mode_to_bsb_mode(zcl_mode);
+            if (is_z2) {
+                z2_mode_ = bsb_mode;
+            } else {
+                z1_mode_ = bsb_mode;
+            }
             ESP_LOGI(TAG, "[Zigbee->BSB] %s Mode -> ZCL=0x%02X (BSB=%u)", zone_name, zcl_mode, bsb_mode);
             bus_->enqueue_set_uint8(mode_field, bsb_mode);
             report_attr(ep, ESP_ZB_ZCL_CLUSTER_ID_THERMOSTAT, attr_id);
+            update_thermostat_running_state();
         }
     }
 
@@ -1167,25 +1175,117 @@ void ZbBridge::report_attr(uint8_t ep, uint16_t cluster_id, uint16_t attr_id) {
     }
 }
 
+static bool is_dhw_status_heating(uint8_t code) {
+    // Codes de chauffe active ECS sur Siemens RVS21 (Prog 8003) :
+    // 58 = Protection antigel ECS, 61 = Charge forcée légionellose, 63 = Charge ECS active,
+    // 66 = Charge appoint, 67 = Charge complémentaire, 93 = En charge par PAC,
+    // 94 = En charge par appoint, 97 = En charge
+    return (code == 58 || code == 61 || code == 63 || code == 66 ||
+            code == 67 || code == 93 || code == 94 || code == 97);
+}
+
+static bool is_zone_status_heating(uint8_t code) {
+    // Codes de chauffe active d'une zone sur Siemens RVS21 (Prog 8000 / 8001) :
+    // 17 = Protection antigel active, 95 = Chauffage forcé, 101 = Régime chauffe Confort,
+    // 102 = Régime chauffe Réduit, 103 = Antigel ambiante, 106 = Séchage dalle,
+    // 115 = Optimisation début, 118 = En demande de chauffage, 119 = Préchauffage confort
+    return (code == 17 || code == 95 || code == 101 || code == 102 || code == 103 ||
+            code == 106 || code == 115 || code == 118 || code == 119);
+}
+
+static bool is_hp_status_stopped(uint8_t code) {
+    // Codes d'arrêt / verrouillage PAC (Prog 8006) :
+    // 3 = Arrêt verrouillage, 50 = Verrouillage temporaire compresseur,
+    // 51 = Arrêt / Pas de demande, 52 = Délestage, 128 = Temps min arrêt, 129 = Post-fonct. pompe
+    return (code == 3 || code == 50 || code == 51 || code == 52 || code == 128 || code == 129);
+}
+
 void ZbBridge::update_thermostat_running_state() {
-    if (caps_.zone1.present) {
-        const bool z1_circulating = caps_.has_hp_pump_state ? hp_pump_running_ : z1_pump_running_;
-        const bool z1_heating = z1_circulating && (comp_running_ || !caps_.has_compressor_state);
-        set_thermostat_u16_attr(EP_MASTER_Z1,
-                                ESP_ZB_ZCL_ATTR_THERMOSTAT_THERMOSTAT_RUNNING_STATE_ID,
-                                z1_heating ? 0x0001 : 0x0000);
-        set_thermostat_u8_attr(EP_MASTER_Z1,
-                               ESP_ZB_ZCL_ATTR_THERMOSTAT_RUNNING_MODE_ID,
-                               z1_heating ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+    const bool hp_active   = (comp_running_ || !caps_.has_compressor_state) && !is_hp_status_stopped(hp_status_code_);
+    const bool dhw_heating = caps_.has_dhw && is_dhw_status_heating(dhw_status_code_);
+    const uint8_t active_demand = hp_active ? (comp_mod_ > 0 ? comp_mod_ : 100) : 0;
+
+    bool z1_heating = false;
+    if (caps_.zone1.present && !dhw_heating) {
+        const bool z1_frost_active = (z1_status_code_ == 17 || z1_status_code_ == 103);
+        const bool z1_mode_allows  = (z1_mode_ != static_cast<uint8_t>(bsb::HeatingMode::Protection)) || z1_frost_active;
+        if (z1_mode_allows && hp_active) {
+            if (z1_status_code_ != 0) {
+                z1_heating = is_zone_status_heating(z1_status_code_);
+            } else {
+                z1_heating = z1_pump_running_;
+            }
+        }
     }
+
+    bool z2_heating = false;
+    if (caps_.zone2.present && !dhw_heating) {
+        const bool z2_frost_active = (z2_status_code_ == 17 || z2_status_code_ == 103);
+        const bool z2_mode_allows  = (z2_mode_ != static_cast<uint8_t>(bsb::HeatingMode::Protection)) || z2_frost_active;
+        if (z2_mode_allows && hp_active) {
+            if (z2_status_code_ != 0) {
+                z2_heating = is_zone_status_heating(z2_status_code_);
+            } else {
+                z2_heating = z2_pump_running_;
+            }
+        }
+    }
+
+    if (caps_.zone1.present) {
+        const uint8_t z1_demand = z1_heating ? active_demand : 0;
+        if (last_z1_heating_ != static_cast<int8_t>(z1_heating)) {
+            last_z1_heating_ = static_cast<int8_t>(z1_heating);
+            set_thermostat_u16_attr(EP_MASTER_Z1,
+                                    ESP_ZB_ZCL_ATTR_THERMOSTAT_THERMOSTAT_RUNNING_STATE_ID,
+                                    z1_heating ? 0x0001 : 0x0000);
+            set_thermostat_u8_attr(EP_MASTER_Z1,
+                                   ESP_ZB_ZCL_ATTR_THERMOSTAT_RUNNING_MODE_ID,
+                                   z1_heating ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+        }
+        if (last_z1_demand_ != static_cast<int16_t>(z1_demand)) {
+            last_z1_demand_ = static_cast<int16_t>(z1_demand);
+            set_thermostat_u8_attr(EP_MASTER_Z1,
+                                   ESP_ZB_ZCL_ATTR_THERMOSTAT_PI_HEATING_DEMAND_ID,
+                                   z1_demand);
+        }
+    }
+
     if (caps_.zone2.present) {
-        const bool z2_heating = z2_pump_running_ && (comp_running_ || !caps_.has_compressor_state);
-        set_thermostat_u16_attr(EP_ZONE2,
-                                ESP_ZB_ZCL_ATTR_THERMOSTAT_THERMOSTAT_RUNNING_STATE_ID,
-                                z2_heating ? 0x0001 : 0x0000);
-        set_thermostat_u8_attr(EP_ZONE2,
-                               ESP_ZB_ZCL_ATTR_THERMOSTAT_RUNNING_MODE_ID,
-                               z2_heating ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+        const uint8_t z2_demand = z2_heating ? active_demand : 0;
+        if (last_z2_heating_ != static_cast<int8_t>(z2_heating)) {
+            last_z2_heating_ = static_cast<int8_t>(z2_heating);
+            set_thermostat_u16_attr(EP_ZONE2,
+                                    ESP_ZB_ZCL_ATTR_THERMOSTAT_THERMOSTAT_RUNNING_STATE_ID,
+                                    z2_heating ? 0x0001 : 0x0000);
+            set_thermostat_u8_attr(EP_ZONE2,
+                                   ESP_ZB_ZCL_ATTR_THERMOSTAT_RUNNING_MODE_ID,
+                                   z2_heating ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+        }
+        if (last_z2_demand_ != static_cast<int16_t>(z2_demand)) {
+            last_z2_demand_ = static_cast<int16_t>(z2_demand);
+            set_thermostat_u8_attr(EP_ZONE2,
+                                   ESP_ZB_ZCL_ATTR_THERMOSTAT_PI_HEATING_DEMAND_ID,
+                                   z2_demand);
+        }
+    }
+
+    if (caps_.has_dhw) {
+        const uint8_t dhw_demand = dhw_heating ? (active_demand > 0 ? active_demand : 100) : 0;
+        if (last_dhw_heating_ != static_cast<int8_t>(dhw_heating)) {
+            last_dhw_heating_ = static_cast<int8_t>(dhw_heating);
+            set_thermostat_u16_attr(EP_DHW,
+                                    ESP_ZB_ZCL_ATTR_THERMOSTAT_THERMOSTAT_RUNNING_STATE_ID,
+                                    dhw_heating ? 0x0001 : 0x0000);
+            set_thermostat_u8_attr(EP_DHW,
+                                   ESP_ZB_ZCL_ATTR_THERMOSTAT_RUNNING_MODE_ID,
+                                   dhw_heating ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+        }
+        if (last_dhw_demand_ != static_cast<int16_t>(dhw_demand)) {
+            last_dhw_demand_ = static_cast<int16_t>(dhw_demand);
+            set_thermostat_u8_attr(EP_DHW,
+                                   ESP_ZB_ZCL_ATTR_THERMOSTAT_PI_HEATING_DEMAND_ID,
+                                   dhw_demand);
+        }
     }
 }
 
@@ -1219,34 +1319,39 @@ void ZbBridge::on_bsb_value(const bsb::DecodedValue& val) {
             break;
 
         case COMPRESSOR_STATE:
-            comp_running_ = val.bool_val;
-            set_binary_input_attr(EP_MASTER_Z1, val.bool_val);
-            update_thermostat_running_state();
+            if (val.flag_byte == 0x00) {
+                comp_running_ = val.bool_val;
+                set_binary_input_attr(EP_MASTER_Z1, val.bool_val);
+                if (!comp_running_) {
+                    set_analog_input_attr(EP_MASTER_Z1, 0.0f);
+                }
+                update_thermostat_running_state();
+            }
             break;
 
         case HP_PUMP_STATE:
-            hp_pump_running_ = val.bool_val;
-            z1_pump_running_ = val.bool_val;
-            if (caps_.has_hp_pump_state || caps_.zone1.has_pump_state) {
-                set_binary_input_attr(EP_HYDRAULIC1, val.bool_val);
+            // Sur RVS21, 8406 renvoie flag_byte=0x01 ("---") s'il n'y a pas de pompe primaire Q9 dédiée
+            if (val.flag_byte == 0x00) {
+                hp_pump_running_ = val.bool_val;
+                z1_pump_running_ = val.bool_val;
+                if (caps_.has_hp_pump_state || caps_.zone1.has_pump_state) {
+                    set_binary_input_attr(EP_HYDRAULIC1, val.bool_val);
+                }
+                update_thermostat_running_state();
             }
-            update_thermostat_running_state();
             break;
 
         case COMPRESSOR_MOD: {
             uint8_t demand = static_cast<uint8_t>(val.int_val > 100 ? 100 : (val.int_val < 0 ? 0 : val.int_val));
-            set_analog_input_attr(EP_MASTER_Z1, static_cast<float>(demand));
-            if (caps_.zone1.present) {
-                set_thermostat_u8_attr(EP_MASTER_Z1, ESP_ZB_ZCL_ATTR_THERMOSTAT_PI_HEATING_DEMAND_ID, demand);
-            }
-            if (caps_.zone2.present) {
-                set_thermostat_u8_attr(EP_ZONE2, ESP_ZB_ZCL_ATTR_THERMOSTAT_PI_HEATING_DEMAND_ID, demand);
-            }
+            comp_mod_ = demand;
+            const bool hp_active = (comp_running_ || !caps_.has_compressor_state) && !is_hp_status_stopped(hp_status_code_);
+            set_analog_input_attr(EP_MASTER_Z1, static_cast<float>(hp_active ? demand : 0));
+            update_thermostat_running_state();
             break;
         }
 
         case BACKUP_HEATER_STATE:
-            if (caps_.has_backup_heater) {
+            if (caps_.has_backup_heater && val.flag_byte == 0x00) {
                 set_binary_input_attr(EP_BACKUP_AUX, val.bool_val);
             }
             break;
@@ -1259,19 +1364,23 @@ void ZbBridge::on_bsb_value(const bsb::DecodedValue& val) {
 
         case HP_STATUS_CODE:
             if (caps_.has_hp_status_code) {
+                hp_status_code_ = static_cast<uint8_t>(val.int_val);
                 ESP_LOGD(TAG, "Statut PAC (8006) = %ld (%s)",
                          static_cast<long>(val.int_val),
                          bsb::get_hp_status_text_fr(static_cast<uint16_t>(val.int_val)));
                 set_analog_input_attr(EP_HYDRAULIC1, val.float_val);
+                update_thermostat_running_state();
             }
             break;
 
         // --- Zone 1 ---
         case Z1_MODE:
             if (caps_.zone1.present) {
+                z1_mode_ = static_cast<uint8_t>(val.int_val);
                 set_thermostat_u8_attr(EP_MASTER_Z1,
                                        ESP_ZB_ZCL_ATTR_THERMOSTAT_SYSTEM_MODE_ID,
-                                       bsb_mode_to_zcl_system_mode(static_cast<uint8_t>(val.int_val)));
+                                       bsb_mode_to_zcl_system_mode(z1_mode_));
+                update_thermostat_running_state();
             }
             break;
 
@@ -1319,9 +1428,9 @@ void ZbBridge::on_bsb_value(const bsb::DecodedValue& val) {
             break;
 
         case Z1_PUMP_STATE:
-            if (!caps_.has_hp_pump_state) {
+            if (val.flag_byte == 0x00) {
                 z1_pump_running_ = val.bool_val;
-                if (caps_.zone1.has_pump_state) {
+                if (caps_.zone1.has_pump_state || caps_.has_hp_pump_state) {
                     set_binary_input_attr(EP_HYDRAULIC1, val.bool_val);
                 }
                 update_thermostat_running_state();
@@ -1330,16 +1439,20 @@ void ZbBridge::on_bsb_value(const bsb::DecodedValue& val) {
 
         case Z1_STATUS_CODE:
             if (caps_.zone1.has_status_code) {
+                z1_status_code_ = static_cast<uint8_t>(val.int_val);
                 set_analog_input_attr(EP_HYDRAULIC2, val.float_val);
+                update_thermostat_running_state();
             }
             break;
 
         // --- Zone 2 ---
         case Z2_MODE:
             if (caps_.zone2.present) {
+                z2_mode_ = static_cast<uint8_t>(val.int_val);
                 set_thermostat_u8_attr(EP_ZONE2,
                                        ESP_ZB_ZCL_ATTR_THERMOSTAT_SYSTEM_MODE_ID,
-                                       bsb_mode_to_zcl_system_mode(static_cast<uint8_t>(val.int_val)));
+                                       bsb_mode_to_zcl_system_mode(z2_mode_));
+                update_thermostat_running_state();
             }
             break;
 
@@ -1384,16 +1497,20 @@ void ZbBridge::on_bsb_value(const bsb::DecodedValue& val) {
             break;
 
         case Z2_PUMP_STATE:
-            z2_pump_running_ = val.bool_val;
-            if (caps_.zone2.has_pump_state) {
-                set_binary_input_attr(EP_ZONE2, val.bool_val);
+            if (val.flag_byte == 0x00) {
+                z2_pump_running_ = val.bool_val;
+                if (caps_.zone2.has_pump_state) {
+                    set_binary_input_attr(EP_ZONE2, val.bool_val);
+                }
+                update_thermostat_running_state();
             }
-            update_thermostat_running_state();
             break;
 
         case Z2_STATUS_CODE:
             if (caps_.zone2.has_status_code) {
+                z2_status_code_ = static_cast<uint8_t>(val.int_val);
                 set_analog_input_attr(EP_ZONE2, val.float_val);
+                update_thermostat_running_state();
             }
             break;
 
@@ -1444,17 +1561,9 @@ void ZbBridge::on_bsb_value(const bsb::DecodedValue& val) {
 
         case DHW_STATUS_CODE:
             if (caps_.has_dhw) {
+                dhw_status_code_ = static_cast<uint8_t>(val.int_val);
                 set_analog_input_attr(EP_DHW, val.float_val);
-                // Codes de chauffe active ECS :
-                // 61 = Charge forcée légionellose, 63 = Charge ECS active, 66 = Charge appoint, 97 = En charge
-                int32_t code = static_cast<int32_t>(val.float_val);
-                bool dhw_heating = (code == 61 || code == 63 || code == 66 || code == 97);
-                set_thermostat_u16_attr(EP_DHW,
-                                        ESP_ZB_ZCL_ATTR_THERMOSTAT_THERMOSTAT_RUNNING_STATE_ID,
-                                        dhw_heating ? 0x0001 : 0x0000);
-                set_thermostat_u8_attr(EP_DHW,
-                                       ESP_ZB_ZCL_ATTR_THERMOSTAT_RUNNING_MODE_ID,
-                                       dhw_heating ? ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_HEAT : ESP_ZB_ZCL_THERMOSTAT_SYSTEM_MODE_OFF);
+                update_thermostat_running_state();
             }
             break;
 

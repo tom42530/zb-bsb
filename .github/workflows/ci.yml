@@ -100,10 +100,10 @@ jobs:
           if-no-files-found: error
 
   publish-ota:
-    name: Publish Zigbee OTA Release on GitHub (Manual Trigger)
+    name: Publish Zigbee OTA Release on GitHub
     runs-on: ubuntu-latest
     needs: firmware-build
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     permissions:
       contents: write
     steps:
@@ -121,7 +121,7 @@ jobs:
           RELEASE_TAG: ${{ needs.firmware-build.outputs.release_tag }}
           OTA_VER_HEX: ${{ needs.firmware-build.outputs.ota_version_hex }}
           OTA_VER_DEC: ${{ needs.firmware-build.outputs.ota_version_dec }}
-          RELEASE_NOTES: ${{ inputs.release_notes }}
+          RELEASE_NOTES: ${{ inputs.release_notes || 'Publication automatique du firmware Zigbee OTA via push sur main.' }}
         run: |
           TITLE="ZB-BSB Firmware OTA ${OTA_VER_HEX}"
           NOTES="${RELEASE_NOTES}
