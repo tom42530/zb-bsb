@@ -68,7 +68,14 @@ flowchart LR
 zb-bsb/
 ├── platformio.ini                   # PlatformIO configuration (XIAO ESP32-C6 + native unit test environment)
 ├── doc/
-│   └── screenshot/                  # Home Assistant integration screenshots (controls, sensors, diagnostics)
+│   ├── gerber-zb-bzb.zip            # Complete PCB manufacturing Gerber files
+│   ├── zb-bsb-enclosure_full.3mf    # 3D printable enclosure model (.3mf)
+│   └── screenshot/                  # Integration & hardware screenshots
+│       ├── control.png              # Home Assistant Controls card
+│       ├── diag.png                 # Home Assistant Diagnostic & OTA card
+│       ├── sensor.png               # Home Assistant Sensors card
+│       ├── schema-zb-bsb.png        # Electronic circuit schematic
+│       └── enclosure.jpeg           # Photo of the finished 3D printed enclosure
 ├── include/
 │   └── board_config.h               # XIAO ESP32-C6 hardware pinout (D7/D6, LED, BOOT button, RF switch)
 ├── lib/
@@ -336,6 +343,73 @@ pio test -e native -v
 # Verify embedded test compilation for ESP32-C6
 pio test -e seeed_xiao_esp32c6 --without-uploading --without-testing
 ```
+
+---
+
+## Electronic Circuit Design & PCB Fabrication
+
+The **ZB-BSB** bridge integrates full optical isolation and an onboard 230V AC power supply directly on a single custom PCB, eliminating external USB power bricks and ensuring safe galvanic isolation from the heat pump's electronic controller.
+
+<p align="center">
+  <a href="doc/screenshot/schema-zb-bsb.png"><img src="doc/screenshot/schema-zb-bsb.png" alt="ZB-BSB Electronic Schematic" width="100%"></a>
+</p>
+
+### Downloadable Resources
+* **Fabrication Gerbers**: [`doc/gerber-zb-bzb.zip`](doc/gerber-zb-bzb.zip) — Ready-to-order Gerber archive (JLCPCB, PCBWay, AISLER...).
+* **High-Resolution Schematic**: [`doc/screenshot/schema-zb-bsb.png`](doc/screenshot/schema-zb-bsb.png)
+
+### Circuit Highlights
+1. **Galvanic Isolation (BSB Bus)**:
+   * **`U2` & `U3` (TLP620-2)**: Dual-channel optocouplers isolating both RX (`GPIO17` / `D7`) and TX (`GPIO16` / `D6`) lines from high voltage transients on the BSB bus.
+   * **Transistor Conditioning**: `BC547` (NPN) and `BC557` (PNP) conditioning stages matched with `1.5 kΩ`, `10 kΩ`, `1 kΩ`, and `4.7 kΩ` resistors to preserve clean 4800 baud inverted signal edges.
+   * **Bus Protection**: `1N4148` diode `D1` protecting against reverse polarity on the BSB differential bus (`CL+` / `CL-`).
+   * **Visual Bus Activity**: Red LED `D2` providing instant visual feedback on bus communication.
+2. **Integrated 230V AC Power Supply (Autonomous)**:
+   * **`U5` (Hi-Link HLK-PM01)**: Compact AC-DC step-down converter providing regulated 5V DC (`600 mA` / `3 W`) directly to the Seeed Studio XIAO ESP32-C6 (`VCC` / `GND`).
+   * **Direct Heat Pump Connection**: Connected directly to the heat pump's internal 230V terminals via screw terminal `U6` (`AC AC`), avoiding any external wall power adapter.
+
+### Bill of Materials (BOM)
+
+| Designator | Component / Value | Package | Description |
+| :--- | :--- | :--- | :--- |
+| **`U7`** | **Seeed Studio XIAO ESP32-C6** | SMD Module | Microcontroller & Zigbee 3.0 router |
+| **`U5`** | **Hi-Link HLK-PM01** | PCB Module | 230V AC to 5V DC step-down power supply |
+| **`U2`, `U3`** | **TLP620-2** | DIP-8 | Dual optocouplers (galvanic isolation) |
+| **`T1`** | **BC547** | TO-92 | NPN bipolar transistor |
+| **`Q1`** | **BC557** | TO-92 | PNP bipolar transistor |
+| **`D1`** | **1N4148** | DO-35 | Fast switching diode (polarity protection) |
+| **`D2`** | **3 mm / 5 mm Red LED** | Through-hole | BSB bus activity indicator |
+| **`R1`** | **1.5 kΩ** (1/4 W) | Axial | Bus conditioning resistor |
+| **`R2`** | **10 kΩ** (1/4 W) | Axial | Bus conditioning resistor |
+| **`R3`** | **1 kΩ** (1/4 W) | Axial | Transistor base drive resistor |
+| **`R4`, `R5`** | **4.7 kΩ** (1/4 W) | Axial | Optocoupler & pull-up resistors |
+| **`U1`, `U6`** | **2-pin Terminal Block (5.04 mm / 5.08 mm)** | M3 Screw | BSB bus (`CL+`/`CL-`) and mains (`AC`/`AC`) |
+| **Antenna** | **U.FL to SMA pigtail + 2.4 GHz antenna** | SMA Female | External high-gain Zigbee antenna |
+
+---
+
+## 3D Printed Enclosure
+
+A dedicated custom enclosure was designed to house the PCB, Seeed Studio XIAO ESP32-C6, Hi-Link power module, and terminal blocks while offering clean cable routing and an external antenna mount.
+
+<p align="center">
+  <a href="doc/screenshot/enclosure.jpeg"><img src="doc/screenshot/enclosure.jpeg" alt="ZB-BSB Finished 3D Printed Enclosure" width="420"></a>
+</p>
+
+### Downloadable Model
+* **3D Print Model**: [`doc/zb-bsb-enclosure_full.3mf`](doc/zb-bsb-enclosure_full.3mf) — Pre-configured 3MF project ready to slice (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura).
+
+### Design Features
+* **Embossed Two-Tone Lettering**: Clear integrated markings for **`AC AC`** (230V input), **`CL+ CL-`** (BSB bus), and **`ZB-BSB`** branding.
+* **Status LED Viewport**: Dedicated light pipe opening directly above the bus activity LED `D2`.
+* **External Antenna Port**: Side cutout designed to securely fasten an SMA connector for an external high-gain 2.4 GHz Zigbee antenna.
+* **Maintenance & USB-C Access**: Cutout allowing USB-C cable insertion for initial flashing or serial debugging without dismantling the case.
+
+### Printing Recommendations
+* **Filament**: **PETG**, **ABS**, or **ASA** strongly recommended over PLA due to temperature resistance inside boiler rooms or heat pump cabinets.
+* **Layer Height**: `0.20 mm` (optimal strength and text sharpness).
+* **Infill**: `20%` (Gyroid or Grid).
+* **Multi-Color / Dual Filament**: Color swap on top layers (e.g. white text on textured black body) for sharp contrast as shown in the picture.
 
 ---
 

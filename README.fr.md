@@ -68,7 +68,14 @@ flowchart LR
 zb-bsb/
 ├── platformio.ini                   # Configuration PlatformIO (XIAO ESP32-C6 + environnement de tests natifs)
 ├── doc/
-│   └── screenshot/                  # Captures d'écran de l'intégration Home Assistant (contrôles, capteurs, diagnostic)
+│   ├── gerber-zb-bzb.zip            # Archive des fichiers Gerber pour fabrication du PCB
+│   ├── zb-bsb-enclosure_full.3mf    # Modèle 3D du boîtier à imprimer (.3mf)
+│   └── screenshot/                  # Captures d'écran et photos matérielles
+│       ├── control.png              # Carte Contrôles Home Assistant
+│       ├── diag.png                 # Carte Diagnostic & OTA Home Assistant
+│       ├── sensor.png               # Carte Capteurs Home Assistant
+│       ├── schema-zb-bsb.png        # Schéma du circuit électronique
+│       └── enclosure.jpeg           # Photo du boîtier imprimé en 3D terminé
 ├── include/
 │   └── board_config.h               # Brochage matériel XIAO ESP32-C6 (D7/D6, LED, Bouton BOOT, Switch RF)
 ├── lib/
@@ -336,6 +343,73 @@ pio test -e native -v
 # Vérifier la compilation des tests embarqués pour l'ESP32-C6
 pio test -e seeed_xiao_esp32c6 --without-uploading --without-testing
 ```
+
+---
+
+## Conception du Circuit Électronique & Fabrication du PCB
+
+Le pont **ZB-BSB** intègre une isolation optique complète et une alimentation secteur 230V autonome directement sur un PCB dédié, éliminant tout bloc d'alimentation USB externe et garantissant une isolation galvanique totale vis-à-vis de l'électronique de la pompe à chaleur.
+
+<p align="center">
+  <a href="doc/screenshot/schema-zb-bsb.png"><img src="doc/screenshot/schema-zb-bsb.png" alt="Schéma Électronique ZB-BSB" width="100%"></a>
+</p>
+
+### Ressources Disponibles au Téléchargement
+* **Fichiers Gerber de Fabrication** : [`doc/gerber-zb-bzb.zip`](doc/gerber-zb-bzb.zip) — Archive prête à commander chez un fabricant de PCB (JLCPCB, PCBWay, AISLER...).
+* **Schéma Électronique Haute Définition** : [`doc/screenshot/schema-zb-bsb.png`](doc/screenshot/schema-zb-bsb.png)
+
+### Points Clés du Circuit
+1. **Isolation Galvanique (Bus BSB)** :
+   * **`U2` & `U3` (TLP620-2)** : Optocoupleurs doubles isolant la ligne de réception RX (`GPIO17` / `D7`) et la ligne d'émission TX (`GPIO16` / `D6`) de tout parasite ou surtension du bus BSB.
+   * **Conditionnement par Transistors** : Étages de commutation `BC547` (NPN) et `BC557` (PNP) associés à des résistances de `1,5 kΩ`, `10 kΩ`, `1 kΩ` et `4,7 kΩ` pour des fronts de signaux 4800 bauds nets et inversés.
+   * **Protection du Bus** : Diode `1N4148` (`D1`) protégeant contre toute inversion de polarité sur les bornes différentielles `CL+` / `CL-`.
+   * **Témoin Visuel d'Activité** : LED rouge `D2` clignotant au rythme des échanges de trames sur le bus BSB.
+2. **Alimentation Secteur 230V Intégrée (Autonome)** :
+   * **`U5` (Hi-Link HLK-PM01)** : Convertisseur abaisseur AC-DC fournissant une tension 5V continue régulée (`600 mA` / `3 W`) directement aux broches `VCC` et `GND` du Seeed Studio XIAO ESP32-C6.
+   * **Raccordement Direct à la PAC** : Se branche directement sur les borniers 230V de la pompe à chaleur via le bornier à vis `U6` (`AC AC`), sans chargeur secteur externe ni câble USB disgracieux.
+
+### Nomenclature des Composants (BOM)
+
+| Réf. Schéma | Composant / Valeur | Boîtier | Rôle / Description |
+| :--- | :--- | :--- | :--- |
+| **`U7`** | **Seeed Studio XIAO ESP32-C6** | Module SMD | Microcontrôleur & routeur Zigbee 3.0 |
+| **`U5`** | **Hi-Link HLK-PM01** | Module PCB | Alimentation 230V AC vers 5V DC régulée |
+| **`U2`, `U3`** | **TLP620-2** | DIP-8 | Optocoupleurs doubles (isolation galvanique) |
+| **`T1`** | **BC547** | TO-92 | Transistor bipolaire NPN |
+| **`Q1`** | **BC557** | TO-92 | Transistor bipolaire PNP |
+| **`D1`** | **1N4148** | DO-35 | Diode de commutation rapide (protection polarité) |
+| **`D2`** | **LED Rouge 3 mm / 5 mm** | Traversant | Témoin d'activité de communication BSB |
+| **`R1`** | **1,5 kΩ** (1/4 W) | Axial | Résistance de conditionnement bus |
+| **`R2`** | **10 kΩ** (1/4 W) | Axial | Résistance de conditionnement bus |
+| **`R3`** | **1 kΩ** (1/4 W) | Axial | Résistance de commande de base |
+| **`R4`, `R5`** | **4,7 kΩ** (1/4 W) | Axial | Résistances de polarisation et pull-up |
+| **`U1`, `U6`** | **Borniers à vis 2p (pas 5,04 mm / 5,08 mm)** | M3 Traversant | Raccordements bus BSB (`CL+`/`CL-`) et secteur (`AC`/`AC`) |
+| **Antenne** | **Pigtail U.FL vers SMA + antenne 2,4 GHz** | SMA Femelle | Antenne externe Zigbee à haut gain |
+
+---
+
+## Impression 3D du Boîtier
+
+Un boîtier sur-mesure a été spécialement conçu pour accueillir le PCB complet, le Seeed Studio XIAO ESP32-C6, le module d'alimentation Hi-Link et les borniers à vis, tout en intégrant une fixation pour antenne externe.
+
+<p align="center">
+  <a href="doc/screenshot/enclosure.jpeg"><img src="doc/screenshot/enclosure.jpeg" alt="Boîtier 3D ZB-BSB Terminé" width="420"></a>
+</p>
+
+### Modèle Téléchargeable
+* **Fichier d'Impression 3D** : [`doc/zb-bsb-enclosure_full.3mf`](doc/zb-bsb-enclosure_full.3mf) — Projet 3MF pré-configuré, prêt à découper (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura).
+
+### Caractéristiques du Boîtier
+* **Marquages en Relief Bicolores** : Inscriptions intégrées nettes pour repérer les entrées **`AC AC`** (alimentation secteur 230V), **`CL+ CL-`** (bus BSB) et le marquage **`ZB-BSB`**.
+* **Fenêtre LED d'Activité** : Puits de lumière placé directement au-dessus de la LED rouge `D2` pour observer le trafic BSB boîtier fermé.
+* **Port Antenne Externe** : Emplacement dédié pour visser solidement l'embase SMA de l'antenne Zigbee externe reliée en U.FL.
+* **Accès Maintenance & USB-C** : Ouverture latérale permettant de raccorder le câble USB-C pour les opérations de flash initial ou de diagnostic série sans ouvrir le boîtier.
+
+### Recommandations d'Impression
+* **Matériau** : **PETG**, **ABS** ou **ASA** fortement recommandés par rapport au PLA pour une meilleure résistance thermique en buanderie ou dans le compartiment électrique de la PAC.
+* **Hauteur de Couche** : `0,20 mm` (excellent compromis solidité / netteté des textes).
+* **Remplissage** : `20 %` (Gyroid ou Grille).
+* **Impression Bicolore** : Changement de filament sur les dernières couches supérieures (ex. texte blanc sur corps noir texturé) pour un rendu contrasté identique à la photo.
 
 ---
 
