@@ -34,9 +34,9 @@ void BsbFrame::serialize() {
     raw[idx++] = total_len;
     raw[idx++] = static_cast<uint8_t>(command);
 
-    // Particularité protocole BSB : pour GET, SET et INF, les 2 premiers octets
-    // du field_id doivent être permutés lors de l'émission sur le bus.
-    if (command == Command::Get || command == Command::Set || command == Command::Inf) {
+    // Particularité protocole BSB : pour GET, SET et INF adressé à un appareil, les 2 premiers
+    // octets du field_id doivent être permutés lors de l'émission sur le bus.
+    if (has_swapped_field_id(command, dst_addr)) {
         raw[idx++] = static_cast<uint8_t>((field_id >> 16) & 0xFF);
         raw[idx++] = static_cast<uint8_t>((field_id >> 24) & 0xFF);
     } else {
@@ -97,10 +97,10 @@ BsbFrame BsbFrame::make_set_temperature(uint8_t src, uint8_t dst, uint32_t field
     return f;
 }
 
-BsbFrame BsbFrame::make_inf_room_temperature(uint8_t src, uint32_t field_id, float temp_c) {
+BsbFrame BsbFrame::make_inf_room_temperature(uint8_t src, uint8_t dst, uint32_t field_id, float temp_c) {
     BsbFrame f;
     f.src_addr    = src;
-    f.dst_addr    = 0x7F; // Broadcast
+    f.dst_addr    = dst;
     f.command     = Command::Inf;
     f.field_id    = field_id;
 
@@ -111,6 +111,27 @@ BsbFrame BsbFrame::make_inf_room_temperature(uint8_t src, uint32_t field_id, flo
     f.payload_len = 3;
     f.serialize();
     return f;
+}
+
+bool BsbFrame::requests_value_of(const uint8_t* ret_payload, uint8_t ret_payload_len) const {
+    if (command != Command::Set || ret_payload == nullptr || payload_len < 2 || payload_len != ret_payload_len) {
+        return false;
+    }
+    // Écriture ordinaire d'un côté, valeur exploitable de l'autre : sinon rien n'est comparable
+    if (payload[0] != 0x01 || ret_payload[0] != 0x00) {
+        return false;
+    }
+    return memcmp(payload + 1, ret_payload + 1, static_cast<size_t>(payload_len) - 1U) == 0;
+}
+
+/**
+ * @brief Premier octet de la charge utile d'une réponse : bit 0 à 1 = « --- », la fonction est absente
+ *        ou désactivée sur ce régulateur (pompe non câblée, second compresseur inexistant...).
+ *        L'octet de valeur qui suit n'est alors qu'un remplissage (0) et ne doit jamais être pris pour
+ *        un état « arrêt » ou une mesure nulle. Même règle que BSB-LAN (enable_byte & 0x01).
+ */
+static bool value_available(uint8_t flag_byte) {
+    return (flag_byte & 0x01) == 0;
 }
 
 DecodedValue BsbFrame::decode(ValueType expected_type) const {
@@ -151,7 +172,7 @@ DecodedValue BsbFrame::decode(ValueType expected_type) const {
                 out.int_val   = payload[1];
                 out.bool_val  = (payload[1] != 0);
                 out.float_val = out.bool_val ? 1.0f : 0.0f;
-                out.valid     = true;
+                out.valid     = value_available(out.flag_byte);
             }
             break;
         }
@@ -162,18 +183,22 @@ DecodedValue BsbFrame::decode(ValueType expected_type) const {
                 out.int_val   = payload[1];
                 out.float_val = static_cast<float>(out.int_val);
                 out.bool_val  = (out.int_val != 0);
-                // Pour les pourcentages de modulation (8413, 8414), flag_byte != 0 signifie "---" (0%)
-                if ((field_id == fields::COMPRESSOR_MOD || field_id == fields::BACKUP_MOD) && out.flag_byte != 0) {
+                out.valid     = value_available(out.flag_byte);
+                // Exception : une modulation (8413, 8414) passe à « --- » dès que l'organe est à l'arrêt.
+                // C'est un état normal et transitoire, qui vaut 0 % : la valeur reste donc exploitable.
+                if ((field_id == fields::COMPRESSOR_MOD || field_id == fields::BACKUP_MOD) && !out.valid) {
                     out.int_val   = 0;
                     out.float_val = 0.0f;
+                    out.bool_val  = false;
+                    out.valid     = true;
                 }
-                out.valid = true;
             } else if (payload_len == 3) {
                 // Certains codes statut BSB peuvent être retournés sur 16 bits [flag, msb, lsb]
                 out.flag_byte = payload[0];
                 out.int_val   = static_cast<uint16_t>((payload[1] << 8) | payload[2]);
                 out.float_val = static_cast<float>(out.int_val);
-                out.valid     = true;
+                out.bool_val  = (out.int_val != 0);
+                out.valid     = value_available(out.flag_byte);
             }
             break;
         }
@@ -194,12 +219,12 @@ DecodedValue BsbFrame::decode(ValueType expected_type) const {
                 int16_t v     = static_cast<int16_t>((static_cast<uint16_t>(payload[1]) << 8) | payload[2]);
                 out.int_val   = v;
                 out.float_val = static_cast<float>(v);
-                out.valid     = true;
+                out.valid     = value_available(out.flag_byte);
             } else if (payload_len == 2) {
                 out.flag_byte = payload[0];
                 out.int_val   = payload[1];
                 out.float_val = static_cast<float>(out.int_val);
-                out.valid     = true;
+                out.valid     = value_available(out.flag_byte);
             }
             break;
         }
@@ -250,6 +275,7 @@ void BsbFrame::format_debug(char* out_buf, size_t out_size) const {
         case Command::Nack: cmd_str = "NAK"; break;
         case Command::Get:  cmd_str = "GET"; break;
         case Command::Ret:  cmd_str = "RET"; break;
+        case Command::Err:  cmd_str = "ERR"; break;
         default: break;
     }
 
@@ -410,9 +436,9 @@ BsbFrameParser::Step BsbFrameParser::step(uint8_t byte, BsbFrame& out_frame) {
             working_.raw[working_.raw_len++] = byte;
             working_.field_id               |= static_cast<uint32_t>(byte);
 
-            // Si c'est une trame GET ou SET émise par un autre maître (ex: 0x0A),
-            // remettons les 2 premiers octets dans l'ordre canonique.
-            if (working_.command == Command::Get || working_.command == Command::Set) {
+            // Trames à field_id permuté sur le fil (GET/SET d'un autre maître, INF adressé à un
+            // appareil) : remettons les 2 premiers octets dans l'ordre canonique.
+            if (BsbFrame::has_swapped_field_id(working_.command, working_.dst_addr)) {
                 working_.field_id = BsbFrame::swap_field_msb(working_.field_id);
             }
 

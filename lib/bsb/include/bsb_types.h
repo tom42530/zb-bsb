@@ -16,7 +16,8 @@ enum class Command : uint8_t {
     Ack  = 0x04, // Acquittement positif d'un SET
     Nack = 0x05, // Acquittement négatif (erreur / non supporté)
     Get  = 0x06, // Lecture d'un paramètre
-    Ret  = 0x07  // Réponse du régulateur à un GET
+    Ret  = 0x07, // Réponse du régulateur à un GET
+    Err  = 0x08  // Refus du régulateur (charge utile = code d'erreur, 7 = paramètre non pris en charge)
 };
 
 // ============================================================================
@@ -29,7 +30,6 @@ enum class ValueType : uint8_t {
     Int16,           // Entier 16 bits signé big-endian (payload = [flag, msb, lsb])
     Int32,           // Entier 32 bits signé big-endian (payload = [flag, b3, b2, b1, b0])
     Temperature,     // Température BSB : int16_t / 64.0 °C (payload = [flag, msb, lsb])
-    RoomTemperature, // Température d'ambiance diffusée via INF (payload = [msb, lsb, 0x00])
     Binary,          // État binaire (0x00 = OFF, 0xFF/non-zéro = ON)
     String           // Chaîne ASCII terminée par '\0'
 };
@@ -63,6 +63,7 @@ namespace fields {
     static constexpr uint32_t Z1_FLOW_TEMP         = 0x213D0518; // Prog 8743 : Température départ Zone 1 (°C)
     static constexpr uint32_t Z1_PUMP_STATE        = 0x053D09A5; // Prog 8730 : Pompe circuit chauffage Q2 Zone 1
     static constexpr uint32_t Z1_STATUS_CODE       = 0x053D07A3; // Prog 8000 : Code état Circuit Chauffage 1
+    static constexpr uint32_t Z1_ROOM_TEMP_INF     = 0x2D3D0215; // Prog 10000 : Injection température ambiante CC1 (trame INF vers le régulateur)
 
     // --- Zone 2 (Circuit Chauffage 2 — ex: Plancher Chauffant sur AVS55) ---
     static constexpr uint32_t Z2_MODE              = 0x2E3D0574; // Prog 1000 : Mode Zone 2 (0=Hors-gel, 1=Auto, 2=Réduit, 3=Confort)
@@ -73,9 +74,10 @@ namespace fields {
     static constexpr uint32_t Z2_FLOW_TEMP         = 0x223D0518; // Prog 8773 : Température départ Zone 2 (°C)
     static constexpr uint32_t Z2_PUMP_STATE        = 0x053D09A8; // Prog 8760 : Pompe circuit chauffage Q6 Zone 2
     static constexpr uint32_t Z2_STATUS_CODE       = 0x053D07A5; // Prog 8001 : Code état Circuit Chauffage 2
+    static constexpr uint32_t Z2_ROOM_TEMP_INF     = 0x2E3E0215; // Prog 10001 : Injection température ambiante CC2 (2e octet 0x3E attendu par les RVS21)
 
     // --- Eau Chaude Sanitaire (ECS / DHW) ---
-    static constexpr uint32_t DHW_MODE             = 0x31050573; // Prog 1600 : Mode ECS sur RVS21 (0=Arrêt, 1=Marche, 2=Eco)
+    static constexpr uint32_t DHW_MODE             = 0x313D0571; // Prog 1600 : Mode ECS sur RVS21 (0=Arrêt, 1=Marche, 2=Eco)
     static constexpr uint32_t DHW_NOMINAL_SETPOINT = 0x313D06B9; // Prog 1610 : Consigne nominale ECS (°C)
     static constexpr uint32_t DHW_REDUCED_SETPOINT = 0x313D06BA; // Prog 1612 : Consigne réduite ECS (°C)
     static constexpr uint32_t DHW_TANK_TEMP        = 0x313D052F; // Prog 8830 : Température ballon ECS B3 (°C)
@@ -106,7 +108,13 @@ enum class DhwMode : uint8_t {
 // Topologie matérielle découverte automatiquement sur le bus BSB (sauvée en NVS)
 // ============================================================================
 static constexpr uint32_t CAPABILITIES_MAGIC   = 0x5A424253; // "ZBBS"
-static constexpr uint16_t CAPABILITIES_VERSION = 3;
+// À incrémenter dès que les critères de la découverte changent : la topologie mémorisée par un firmware
+// antérieur est alors ignorée et un nouveau scan a lieu au premier démarrage.
+// v4 : une réponse « --- » (octet d'état à 1) n'est plus prise pour un organe présent mais à l'arrêt.
+static constexpr uint16_t CAPABILITIES_VERSION = 4;
+// Plus ancienne version dont le format binaire de BsbCapabilities est identique à l'actuel (à remonter
+// à CAPABILITIES_VERSION dès qu'un champ est ajouté, retiré ou déplacé dans la structure).
+static constexpr uint16_t CAPABILITIES_OLDEST_SAME_LAYOUT = 3;
 
 struct ZoneCapabilities {
     bool  present           = false; // Le circuit répond aux lectures de mode/consigne

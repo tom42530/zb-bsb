@@ -74,6 +74,7 @@ const char* get_field_name(uint32_t field_id) {
         case Z1_FLOW_TEMP:         return "Temp. Depart Zone 1 (8743)";
         case Z1_PUMP_STATE:        return "Pompe Zone 1 Q2 (8730)";
         case Z1_STATUS_CODE:       return "Statut Zone 1 (8000)";
+        case Z1_ROOM_TEMP_INF:     return "Injection Temp. Ambiante Zone 1 (10000)";
         case Z2_MODE:              return "Mode Zone 2 (1000)";
         case Z2_COMFORT_SETPOINT:  return "Consigne Confort Zone 2 (1010)";
         case Z2_REDUCED_SETPOINT:  return "Consigne Reduite Zone 2 (1012)";
@@ -82,6 +83,7 @@ const char* get_field_name(uint32_t field_id) {
         case Z2_FLOW_TEMP:         return "Temp. Depart Zone 2 (8773)";
         case Z2_PUMP_STATE:        return "Pompe Zone 2 Q6 (8760)";
         case Z2_STATUS_CODE:       return "Statut Zone 2 (8001)";
+        case Z2_ROOM_TEMP_INF:     return "Injection Temp. Ambiante Zone 2 (10001)";
         case DHW_MODE:             return "Mode ECS (1600)";
         case DHW_NOMINAL_SETPOINT: return "Consigne Nominale ECS (1610)";
         case DHW_REDUCED_SETPOINT: return "Consigne Reduite ECS (1612)";

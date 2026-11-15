@@ -15,12 +15,14 @@ namespace bsb {
  *   [2]      dst_addr
  *   [3]      length (longueur totale trame = 11 + payload_len)
  *   [4]      command (GET=0x06, RET=0x07, SET=0x03, ACK=0x04, NACK=0x05, INF=0x02)
- *   [5..8]   field_id (octets 5 et 6 inversés pour GET/SET/INF, ordre normal pour RET/ACK/NACK)
+ *   [5..8]   field_id (octets 5 et 6 inversés pour GET, SET et INF adressé à un appareil ;
+ *            ordre normal pour RET/ACK/NACK et pour les INF diffusés en broadcast 0x7F)
  *   [9..N-3] payload (0 à 32 octets)
  *   [N-2..N-1] CRC-16 CCITT XMODEM big-endian sur les octets [0..N-3]
  */
 struct BsbFrame {
     static constexpr uint8_t SOF_BYTE        = 0xDC;
+    static constexpr uint8_t BROADCAST_ADDR  = 0x7F;
     static constexpr size_t  HEADER_NO_PL    = 11; // 1(SOF) + 1(SRC) + 1(DST) + 1(LEN) + 1(CMD) + 4(FIELD) + 2(CRC)
     static constexpr size_t  MAX_PAYLOAD_LEN = 32;
     static constexpr size_t  MAX_FRAME_LEN   = HEADER_NO_PL + MAX_PAYLOAD_LEN;
@@ -51,6 +53,15 @@ struct BsbFrame {
     }
 
     /**
+     * @brief Indique si les 2 premiers octets du field_id sont permutés sur le fil pour ce type de trame.
+     *        (convention du protocole BSB : requêtes GET/SET, et INF adressé à un appareil précis)
+     */
+    static bool has_swapped_field_id(Command command, uint8_t dst_addr) {
+        return command == Command::Get || command == Command::Set ||
+               (command == Command::Inf && dst_addr != BROADCAST_ADDR);
+    }
+
+    /**
      * @brief Sérialise la trame dans `raw[]` et calcule le CRC.
      */
     void serialize();
@@ -71,9 +82,24 @@ struct BsbFrame {
     static BsbFrame make_set_temperature(uint8_t src, uint8_t dst, uint32_t field_id, float temp_c, uint8_t enable_byte = 0x01);
 
     /**
-     * @brief Fabrique une trame INF (broadcast 0x7F) pour injecter une température d'ambiance externe.
+     * @brief Fabrique une trame INF d'injection de température d'ambiance externe, adressée au régulateur
+     *        (même trame qu'une sonde d'ambiance QAA : Prog 10000 = 0x2D3D0215, Prog 10001 = 0x2E3E0215,
+     *        payload = [msb, lsb, 0x00]).
      */
-    static BsbFrame make_inf_room_temperature(uint8_t src, uint32_t field_id, float temp_c);
+    static BsbFrame make_inf_room_temperature(uint8_t src, uint8_t dst, uint32_t field_id, float temp_c);
+
+    /**
+     * @brief Indique si cette trame SET demande exactement la valeur que porte une réponse RET du régulateur.
+     *
+     * Sert à ne pas réécrire un paramètre qui a déjà la valeur voulue (chaque SET est mémorisé par le
+     * régulateur). Ne vaut que pour une écriture ordinaire (octet d'activation 0x01) comparée à une
+     * réponse exploitable (octet d'état 0x00) de même longueur : dans tous les autres cas le résultat
+     * est false, et l'écriture doit avoir lieu.
+     *
+     * @param ret_payload      Charge utile de la réponse RET (octet d'état suivi de la valeur)
+     * @param ret_payload_len  Longueur de cette charge utile
+     */
+    bool requests_value_of(const uint8_t* ret_payload, uint8_t ret_payload_len) const;
 
     /**
      * @brief Décode la charge utile (payload) de la trame selon le type de donnée attendu.

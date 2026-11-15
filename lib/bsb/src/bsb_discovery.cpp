@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include <cmath>
 #include <cstring>
 
 namespace bsb {
@@ -12,8 +13,73 @@ namespace bsb {
 static const char* TAG           = "bsb.discovery";
 static const char* NVS_NAMESPACE = "zb_bsb";
 static const char* NVS_KEY_CAPS  = "caps_v1";
+static const char* NVS_KEY_RESCAN = "rescan_req";
 
-bool BsbDiscovery::load_from_nvs(BsbCapabilities& out_caps) {
+static const char* ext_used_key(uint8_t zone_index) {
+    return (zone_index == 2) ? "ext_used_z2" : "ext_used_z1";
+}
+
+static uint8_t read_flag(const char* key) {
+    nvs_handle_t handle = 0;
+    uint8_t      value  = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        nvs_get_u8(handle, key, &value);
+        nvs_close(handle);
+    }
+    return value;
+}
+
+// N'écrit en flash que si la valeur change
+static void write_flag(const char* key, uint8_t value) {
+    if (read_flag(key) == value) {
+        return;
+    }
+    nvs_handle_t handle = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return;
+    }
+    if (value != 0) {
+        nvs_set_u8(handle, key, value);
+    } else {
+        nvs_erase_key(handle, key);
+    }
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+// Une valeur initiale illisible (NaN, hors plage) après corruption de la flash ne doit jamais
+// atteindre les attributs Zigbee : on retombe sur une valeur par défaut plausible.
+static float sanitize_temp(float value, float min_c, float max_c, float fallback_c) {
+    return (std::isfinite(value) && value >= min_c && value <= max_c) ? value : fallback_c;
+}
+
+static void sanitize_zone(ZoneCapabilities& zone) {
+    zone.initial_comfort_c = sanitize_temp(zone.initial_comfort_c, 5.0f, 35.0f, 20.0f);
+    zone.initial_reduced_c = sanitize_temp(zone.initial_reduced_c, 5.0f, 35.0f, 18.0f);
+    zone.initial_active_c  = sanitize_temp(zone.initial_active_c, 5.0f, 35.0f, zone.initial_comfort_c);
+    zone.initial_room_c    = sanitize_temp(zone.initial_room_c, -5.0f, 45.0f, zone.initial_active_c);
+    zone.initial_flow_c    = sanitize_temp(zone.initial_flow_c, 0.0f, 95.0f, 25.0f);
+    if (zone.initial_mode > static_cast<uint8_t>(HeatingMode::Comfort)) {
+        zone.initial_mode = static_cast<uint8_t>(HeatingMode::Auto);
+    }
+}
+
+static void sanitize_capabilities(BsbCapabilities& caps) {
+    caps.controller_model[sizeof(caps.controller_model) - 1] = '\0';
+    caps.initial_outdoor_c      = sanitize_temp(caps.initial_outdoor_c, -50.0f, 70.0f, 15.0f);
+    caps.initial_hp_flow_c      = sanitize_temp(caps.initial_hp_flow_c, 0.0f, 95.0f, 25.0f);
+    caps.initial_hp_return_c    = sanitize_temp(caps.initial_hp_return_c, 0.0f, 95.0f, 25.0f);
+    caps.initial_dhw_setpoint_c = sanitize_temp(caps.initial_dhw_setpoint_c, 25.0f, 70.0f, 50.0f);
+    caps.initial_dhw_reduced_c  = sanitize_temp(caps.initial_dhw_reduced_c, 25.0f, 70.0f, 40.0f);
+    caps.initial_dhw_tank_c     = sanitize_temp(caps.initial_dhw_tank_c, 0.0f, 95.0f, 45.0f);
+    if (caps.initial_dhw_mode > static_cast<uint8_t>(DhwMode::Eco)) {
+        caps.initial_dhw_mode = static_cast<uint8_t>(DhwMode::On);
+    }
+    sanitize_zone(caps.zone1);
+    sanitize_zone(caps.zone2);
+}
+
+bool BsbDiscovery::load_from_nvs(BsbCapabilities& out_caps, bool allow_older_version) {
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
@@ -29,7 +95,14 @@ bool BsbDiscovery::load_from_nvs(BsbCapabilities& out_caps) {
         return false;
     }
 
-    if (tmp.magic != CAPABILITIES_MAGIC || tmp.version != CAPABILITIES_VERSION) {
+    if (tmp.magic != CAPABILITIES_MAGIC) {
+        return false;
+    }
+    // Une version antérieure de même format binaire n'est acceptée qu'à la demande (repli lorsque la
+    // nouvelle découverte échoue) : ses critères de découverte sont périmés.
+    const bool older_same_layout =
+        tmp.version >= CAPABILITIES_OLDEST_SAME_LAYOUT && tmp.version < CAPABILITIES_VERSION;
+    if (tmp.version != CAPABILITIES_VERSION && !(allow_older_version && older_same_layout)) {
         return false;
     }
 
@@ -38,6 +111,7 @@ bool BsbDiscovery::load_from_nvs(BsbCapabilities& out_caps) {
         return false;
     }
 
+    sanitize_capabilities(tmp);
     out_caps = tmp;
     return true;
 }
@@ -63,6 +137,36 @@ bool BsbDiscovery::save_to_nvs(const BsbCapabilities& caps) {
 
     ESP_LOGI(TAG, "Topologie PAC sauvegardee en NVS avec succes.");
     return true;
+}
+
+void BsbDiscovery::request_rescan() {
+    write_flag(NVS_KEY_RESCAN, 1);
+}
+
+bool BsbDiscovery::rescan_requested() {
+    return read_flag(NVS_KEY_RESCAN) != 0;
+}
+
+void BsbDiscovery::clear_rescan_request() {
+    write_flag(NVS_KEY_RESCAN, 0);
+}
+
+bool BsbDiscovery::external_sensor_used(uint8_t zone_index) {
+    return read_flag(ext_used_key(zone_index)) != 0;
+}
+
+void BsbDiscovery::set_external_sensor_used(uint8_t zone_index, bool used) {
+    write_flag(ext_used_key(zone_index), used ? 1 : 0);
+}
+
+// Une zone alimentée par une sonde externe répond sur 8740 / 8770 comme si elle avait une sonde filaire
+static void forget_injected_room_sensor(ZoneCapabilities& zone, uint8_t zone_index) {
+    if (zone.present && zone.has_room_sensor && BsbDiscovery::external_sensor_used(zone_index)) {
+        ESP_LOGW(TAG, "Zone %u : la temperature d'ambiance relue est celle de la sonde externe injectee, "
+                      "pas une sonde filaire.", zone_index);
+        zone.has_room_sensor = false;
+        zone.initial_room_c  = zone.initial_active_c;
+    }
 }
 
 bool BsbDiscovery::clear_nvs() {
@@ -139,8 +243,9 @@ bool BsbDiscovery::scan_heat_pump(BsbBus& bus, BsbCapabilities& out_caps) {
         caps.has_compressor_mod = true;
     }
 
-    if (bus.query_sync(fields::HP_PUMP_STATE, val, ValueType::Binary, 3, 350) &&
-        val.valid && val.flag_byte == 0x00) {
+    // Les états tout-ou-rien d'un organe absent (pompe non câblée, sortie non affectée) reviennent
+    // à « --- » : decode() les déclare alors invalides et l'organe n'est pas exposé.
+    if (bus.query_sync(fields::HP_PUMP_STATE, val, ValueType::Binary, 3, 350) && val.valid) {
         caps.has_hp_pump_state = true;
     }
 
@@ -148,7 +253,11 @@ bool BsbDiscovery::scan_heat_pump(BsbBus& bus, BsbCapabilities& out_caps) {
         caps.has_backup_heater = true;
     }
 
-    if (bus.query_sync(fields::BACKUP_MOD, val, ValueType::UInt8, 3, 350) && val.valid) {
+    // Modulation d'appoint : decode() ramène « --- » à 0 % (état normal d'un organe modulant à l'arrêt),
+    // mais un appoint tout-ou-rien répond « --- » en permanence. Une résistance modulante étant rare, la
+    // découverte exige une vraie valeur ; sinon l'entité resterait figée à 0 %.
+    if (bus.query_sync(fields::BACKUP_MOD, val, ValueType::UInt8, 3, 350) && val.valid &&
+        (val.flag_byte & 0x01) == 0) {
         caps.has_backup_mod = true;
     }
 
@@ -257,23 +366,112 @@ bool BsbDiscovery::scan_heat_pump(BsbBus& bus, BsbCapabilities& out_caps) {
             is_valid_setpoint(val, 25.0f, 70.0f)) {
             caps.initial_dhw_setpoint_c = val.float_val;
         }
-        if (bus.query_sync(fields::DHW_REDUCED_SETPOINT, val, ValueType::Temperature, 3, 350) &&
-            is_valid_setpoint(val, 25.0f, 70.0f)) {
+        if (bus.query_sync(fields::DHW_REDUCED_SETPOINT, val, ValueType::Temperature, 3, 350) && val.valid) {
+            // Le paramètre existe dès que le régulateur y répond avec une valeur exploitable ; la plage
+            // ne sert qu'à retenir (ou non) cette valeur comme valeur initiale côté Zigbee.
             caps.has_dhw_reduced_setpoint = true;
-            caps.initial_dhw_reduced_c    = val.float_val;
+            if (is_valid_setpoint(val, 25.0f, 70.0f)) {
+                caps.initial_dhw_reduced_c = val.float_val;
+            }
         }
         if (bus.query_sync(fields::DHW_MODE, val, ValueType::UInt8, 3, 350) && val.valid && val.int_val <= 2) {
             caps.initial_dhw_mode = static_cast<uint8_t>(val.int_val);
         }
-        caps.has_dhw_status_code = true;
-        if (bus.query_sync(fields::DHW_STATUS_CODE, val, ValueType::UInt8, 3, 350) && val.valid) {
-            // Statut ECS initialisé
-        }
+        caps.has_dhw_status_code =
+            bus.query_sync(fields::DHW_STATUS_CODE, val, ValueType::UInt8, 3, 350) && val.valid;
     }
 
+    forget_injected_room_sensor(caps.zone1, 1);
+    forget_injected_room_sensor(caps.zone2, 2);
+
+    sanitize_capabilities(caps);
     out_caps = caps;
     log_capabilities(out_caps);
     return true;
+}
+
+void BsbDiscovery::refresh_initial_values(BsbBus& bus, BsbCapabilities& caps) {
+    // Deux échecs consécutifs = régulateur injoignable : on garde l'instantané mémorisé plutôt que
+    // de retarder le démarrage d'une attente par paramètre.
+    uint8_t consecutive_failures = 0;
+    uint8_t refreshed            = 0;
+
+    auto read_temp = [&](uint32_t field, float min_c, float max_c, float& target) {
+        if (consecutive_failures >= 2) {
+            return;
+        }
+        DecodedValue val;
+        if (!bus.query_sync(field, val, ValueType::Temperature, 2, 300)) {
+            ++consecutive_failures;
+            return;
+        }
+        consecutive_failures = 0;
+        if (val.valid && val.float_val >= min_c && val.float_val <= max_c) {
+            target = val.float_val;
+            ++refreshed;
+        }
+    };
+    auto read_mode = [&](uint32_t field, uint8_t max_value, uint8_t& target) {
+        if (consecutive_failures >= 2) {
+            return;
+        }
+        DecodedValue val;
+        if (!bus.query_sync(field, val, ValueType::UInt8, 2, 300)) {
+            ++consecutive_failures;
+            return;
+        }
+        consecutive_failures = 0;
+        if (val.valid && val.int_val >= 0 && val.int_val <= max_value) {
+            target = static_cast<uint8_t>(val.int_val);
+            ++refreshed;
+        }
+    };
+    auto refresh_zone = [&](ZoneCapabilities& zone, uint32_t f_mode, uint32_t f_comfort, uint32_t f_reduced,
+                            uint32_t f_active, uint32_t f_room, uint32_t f_flow) {
+        if (!zone.present) {
+            return;
+        }
+        read_mode(f_mode, static_cast<uint8_t>(HeatingMode::Comfort), zone.initial_mode);
+        read_temp(f_comfort, 5.0f, 35.0f, zone.initial_comfort_c);
+        read_temp(f_reduced, 5.0f, 35.0f, zone.initial_reduced_c);
+        read_temp(f_active, 5.0f, 35.0f, zone.initial_active_c);
+        if (zone.has_room_sensor) {
+            read_temp(f_room, -5.0f, 44.0f, zone.initial_room_c);
+        } else {
+            zone.initial_room_c = zone.initial_active_c; // Même convention qu'à la découverte
+        }
+        if (zone.has_flow_sensor) {
+            read_temp(f_flow, 4.0f, 95.0f, zone.initial_flow_c);
+        }
+    };
+
+    if (caps.has_outdoor_temp)   read_temp(fields::OUTDOOR_TEMP, -50.0f, 70.0f, caps.initial_outdoor_c);
+    if (caps.has_hp_flow_temp)   read_temp(fields::HP_FLOW_TEMP, 4.0f, 95.0f, caps.initial_hp_flow_c);
+    if (caps.has_hp_return_temp) read_temp(fields::HP_RETURN_TEMP, 4.0f, 95.0f, caps.initial_hp_return_c);
+
+    refresh_zone(caps.zone1, fields::Z1_MODE, fields::Z1_COMFORT_SETPOINT, fields::Z1_REDUCED_SETPOINT,
+                 fields::Z1_ACTIVE_SETPOINT, fields::Z1_ROOM_TEMP, fields::Z1_FLOW_TEMP);
+    refresh_zone(caps.zone2, fields::Z2_MODE, fields::Z2_COMFORT_SETPOINT, fields::Z2_REDUCED_SETPOINT,
+                 fields::Z2_ACTIVE_SETPOINT, fields::Z2_ROOM_TEMP, fields::Z2_FLOW_TEMP);
+
+    if (caps.has_dhw) {
+        read_mode(fields::DHW_MODE, static_cast<uint8_t>(DhwMode::Eco), caps.initial_dhw_mode);
+        read_temp(fields::DHW_NOMINAL_SETPOINT, 25.0f, 70.0f, caps.initial_dhw_setpoint_c);
+        if (caps.has_dhw_reduced_setpoint) {
+            read_temp(fields::DHW_REDUCED_SETPOINT, 25.0f, 70.0f, caps.initial_dhw_reduced_c);
+        }
+        if (caps.has_dhw_tank_temp) {
+            read_temp(fields::DHW_TANK_TEMP, 4.0f, 95.0f, caps.initial_dhw_tank_c);
+        }
+    }
+
+    sanitize_capabilities(caps);
+    if (consecutive_failures >= 2) {
+        ESP_LOGW(TAG, "Regulateur injoignable au demarrage : valeurs initiales memorisees conservees (%u relue(s)).",
+                 refreshed);
+    } else {
+        ESP_LOGI(TAG, "Valeurs initiales relues sur le bus BSB : %u (consignes, modes, temperatures).", refreshed);
+    }
 }
 
 void BsbDiscovery::log_capabilities(const BsbCapabilities& caps) {
@@ -310,48 +508,63 @@ void BsbDiscovery::log_capabilities(const BsbCapabilities& caps) {
 void BsbDiscovery::register_discovered_polls(BsbBus& bus, const BsbCapabilities& caps) {
     bus.clear_poll_fields();
 
-    // Capteurs généraux PAC
-    if (caps.has_outdoor_temp)     bus.register_poll_field(fields::OUTDOOR_TEMP,        20000);
-    if (caps.has_hp_flow_temp)     bus.register_poll_field(fields::HP_FLOW_TEMP,        20000);
-    if (caps.has_hp_return_temp)   bus.register_poll_field(fields::HP_RETURN_TEMP,      20000);
-    if (caps.has_compressor_state) bus.register_poll_field(fields::COMPRESSOR_STATE,    20000);
-    if (caps.has_compressor_mod)   bus.register_poll_field(fields::COMPRESSOR_MOD,      20000);
-    if (caps.has_hp_pump_state)    bus.register_poll_field(fields::HP_PUMP_STATE,       20000);
+    // L'ordre d'enregistrement fixe l'ordre du premier tour de lecture (au démarrage, puis après chaque
+    // resynchronisation, les échéances sont échelonnées dans cet ordre). On commence donc par ce qui
+    // détermine l'état de chauffe affiché par les thermostats ; consignes, modes et températures ont
+    // déjà été relus au démarrage et peuvent attendre la fin du tour.
+
+    // 1. Générateur et codes d'état : état de chauffe des trois thermostats
+    if (caps.has_compressor_state) bus.register_poll_field(fields::COMPRESSOR_STATE,    15000);
+    if (caps.has_compressor_mod)   bus.register_poll_field(fields::COMPRESSOR_MOD,      15000);
+    if (caps.has_hp_status_code)   bus.register_poll_field(fields::HP_STATUS_CODE,      15000);
+    if (caps.zone1.present && caps.zone1.has_status_code) bus.register_poll_field(fields::Z1_STATUS_CODE, 15000);
+    if (caps.zone2.present && caps.zone2.has_status_code) bus.register_poll_field(fields::Z2_STATUS_CODE, 15000);
+    // Le code statut ECS (8003) pilote l'état de chauffe du thermostat ballon : toujours scruté
+    if (caps.has_dhw)              bus.register_poll_field(fields::DHW_STATUS_CODE,     15000);
     if (caps.has_backup_heater)    bus.register_poll_field(fields::BACKUP_HEATER_STATE, 30000);
     if (caps.has_backup_mod)       bus.register_poll_field(fields::BACKUP_MOD,          30000);
-    if (caps.has_hp_status_code)   bus.register_poll_field(fields::HP_STATUS_CODE,      45000);
+    // Départ et retour PAC : l'écart entre les deux confirme que la chaleur circule réellement
+    if (caps.has_hp_flow_temp)     bus.register_poll_field(fields::HP_FLOW_TEMP,        20000);
+    if (caps.has_hp_return_temp)   bus.register_poll_field(fields::HP_RETURN_TEMP,      20000);
 
-    // Zone 1
+    // 2. Pompes
+    if (caps.has_hp_pump_state)    bus.register_poll_field(fields::HP_PUMP_STATE,       15000);
+    if (caps.zone1.present && caps.zone1.has_pump_state) bus.register_poll_field(fields::Z1_PUMP_STATE, 25000);
+    if (caps.zone2.present && caps.zone2.has_pump_state) bus.register_poll_field(fields::Z2_PUMP_STATE, 25000);
+
+    // 3. Modes
+    if (caps.zone1.present) bus.register_poll_field(fields::Z1_MODE,  45000);
+    if (caps.zone2.present) bus.register_poll_field(fields::Z2_MODE,  45000);
+    if (caps.has_dhw)       bus.register_poll_field(fields::DHW_MODE, 60000);
+
+    // 4. Températures
+    if (caps.has_outdoor_temp) bus.register_poll_field(fields::OUTDOOR_TEMP, 20000);
     if (caps.zone1.present) {
-        bus.register_poll_field(fields::Z1_MODE,             45000);
+        // Sans sonde filaire, 8740 est tout de même relu (lentement) : c'est lui qui prouve que le
+        // régulateur prend bien en compte la température d'ambiance externe injectée par INF.
+        bus.register_poll_field(fields::Z1_ROOM_TEMP, caps.zone1.has_room_sensor ? 20000 : 60000);
+        if (caps.zone1.has_flow_sensor) bus.register_poll_field(fields::Z1_FLOW_TEMP, 25000);
+    }
+    if (caps.zone2.present) {
+        bus.register_poll_field(fields::Z2_ROOM_TEMP, caps.zone2.has_room_sensor ? 15000 : 60000);
+        if (caps.zone2.has_flow_sensor) bus.register_poll_field(fields::Z2_FLOW_TEMP, 25000);
+    }
+    if (caps.has_dhw && caps.has_dhw_tank_temp) bus.register_poll_field(fields::DHW_TANK_TEMP, 30000);
+
+    // 5. Consignes (elles ne changent que sur action de l'utilisateur)
+    if (caps.zone1.present) {
+        bus.register_poll_field(fields::Z1_ACTIVE_SETPOINT,  45000);
         bus.register_poll_field(fields::Z1_COMFORT_SETPOINT, 60000);
         bus.register_poll_field(fields::Z1_REDUCED_SETPOINT, 90000);
-        bus.register_poll_field(fields::Z1_ACTIVE_SETPOINT,  45000);
-        if (caps.zone1.has_room_sensor) bus.register_poll_field(fields::Z1_ROOM_TEMP,  20000);
-        if (caps.zone1.has_flow_sensor) bus.register_poll_field(fields::Z1_FLOW_TEMP,  25000);
-        if (caps.zone1.has_pump_state)  bus.register_poll_field(fields::Z1_PUMP_STATE, 25000);
-        if (caps.zone1.has_status_code) bus.register_poll_field(fields::Z1_STATUS_CODE,45000);
     }
-
-    // Zone 2
     if (caps.zone2.present) {
-        bus.register_poll_field(fields::Z2_MODE,             45000);
+        bus.register_poll_field(fields::Z2_ACTIVE_SETPOINT,  45000);
         bus.register_poll_field(fields::Z2_COMFORT_SETPOINT, 60000);
         bus.register_poll_field(fields::Z2_REDUCED_SETPOINT, 90000);
-        bus.register_poll_field(fields::Z2_ACTIVE_SETPOINT,  45000);
-        if (caps.zone2.has_room_sensor) bus.register_poll_field(fields::Z2_ROOM_TEMP,  15000);
-        if (caps.zone2.has_flow_sensor) bus.register_poll_field(fields::Z2_FLOW_TEMP,  25000);
-        if (caps.zone2.has_pump_state)  bus.register_poll_field(fields::Z2_PUMP_STATE, 25000);
-        if (caps.zone2.has_status_code) bus.register_poll_field(fields::Z2_STATUS_CODE,45000);
     }
-
-    // Ballon ECS (DHW)
     if (caps.has_dhw) {
-        bus.register_poll_field(fields::DHW_MODE,             60000);
         bus.register_poll_field(fields::DHW_NOMINAL_SETPOINT, 90000);
         if (caps.has_dhw_reduced_setpoint) bus.register_poll_field(fields::DHW_REDUCED_SETPOINT, 120000);
-        if (caps.has_dhw_tank_temp)   bus.register_poll_field(fields::DHW_TANK_TEMP,   30000);
-        bus.register_poll_field(fields::DHW_STATUS_CODE, 45000);
     }
 }
 

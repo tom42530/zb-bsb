@@ -80,14 +80,61 @@ void test_frame_make_set_uint8_mode(void) {
 }
 
 void test_frame_make_inf_room_temperature(void) {
-    // Injection température ambiante Zone 1 (20.0 °C -> 1280 = 0x0500) en broadcast 0x7F
-    BsbFrame f = BsbFrame::make_inf_room_temperature(0x42, fields::Z1_ROOM_TEMP, 20.0f);
-    TEST_ASSERT_EQUAL_HEX8(0x7F, f.dst_addr);
+    // Injection température ambiante Zone 1 (20.0 °C -> 1280 = 0x0500) : même trame qu'une sonde
+    // d'ambiance QAA / que BSB-LAN (Prog 10000), adressée au régulateur 0x00 :
+    //   DC C2 00 0E 02 3D 2D 02 15 05 00 00 <crc>
+    BsbFrame f = BsbFrame::make_inf_room_temperature(0x42, 0x00, fields::Z1_ROOM_TEMP_INF, 20.0f);
+    TEST_ASSERT_EQUAL_HEX8(0x00, f.dst_addr);
     TEST_ASSERT_EQUAL_HEX8(0x02, static_cast<uint8_t>(f.command)); // Command::Inf
     TEST_ASSERT_EQUAL_UINT8(3, f.payload_len);
     TEST_ASSERT_EQUAL_HEX8(0x05, f.payload[0]);
     TEST_ASSERT_EQUAL_HEX8(0x00, f.payload[1]);
     TEST_ASSERT_EQUAL_HEX8(0x00, f.payload[2]);
+
+    const uint8_t expected_z1[] = {0xDC, 0xC2, 0x00, 0x0E, 0x02, 0x3D, 0x2D, 0x02, 0x15, 0x05, 0x00, 0x00};
+    TEST_ASSERT_EQUAL_UINT8(14, f.raw_len);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected_z1, f.raw, sizeof(expected_z1));
+
+    // Zone 2 (Prog 10001) : le 2e octet de l'identifiant vaut 0x3E sur les RVS21 (0x2E3E0215)
+    BsbFrame f2 = BsbFrame::make_inf_room_temperature(0x42, 0x00, fields::Z2_ROOM_TEMP_INF, 19.5f);
+    TEST_ASSERT_EQUAL_HEX8(0x3E, f2.raw[5]);
+    TEST_ASSERT_EQUAL_HEX8(0x2E, f2.raw[6]);
+    TEST_ASSERT_EQUAL_HEX8(0x02, f2.raw[7]);
+    TEST_ASSERT_EQUAL_HEX8(0x15, f2.raw[8]);
+    TEST_ASSERT_EQUAL_HEX8(0x04, f2.raw[9]);  // 19.5 * 64 = 1248 = 0x04E0
+    TEST_ASSERT_EQUAL_HEX8(0xE0, f2.raw[10]);
+}
+
+void test_inf_field_id_swap_depends_on_destination(void) {
+    BsbFrameParser parser;
+    BsbFrame rx;
+
+    // INF adressé à un appareil : identifiant permuté sur le fil, restauré par le parseur
+    BsbFrame unicast = BsbFrame::make_inf_room_temperature(0x06, 0x00, fields::Z1_ROOM_TEMP_INF, 21.0f);
+    bool ok = false;
+    for (uint8_t i = 0; i < unicast.raw_len; ++i) {
+        ok = parser.feed(unicast.raw[i], rx);
+    }
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_HEX32(fields::Z1_ROOM_TEMP_INF, rx.field_id);
+
+    // INF diffusé en broadcast (0x7F) : identifiant dans l'ordre canonique sur le fil
+    BsbFrame broadcast;
+    broadcast.src_addr    = 0x00;
+    broadcast.dst_addr    = BsbFrame::BROADCAST_ADDR;
+    broadcast.command     = Command::Inf;
+    broadcast.field_id    = 0x0500006C; // Date / heure diffusée par le régulateur
+    broadcast.payload_len = 0;
+    broadcast.serialize();
+    TEST_ASSERT_EQUAL_HEX8(0x05, broadcast.raw[5]);
+    TEST_ASSERT_EQUAL_HEX8(0x00, broadcast.raw[6]);
+
+    ok = false;
+    for (uint8_t i = 0; i < broadcast.raw_len; ++i) {
+        ok = parser.feed(broadcast.raw[i], rx);
+    }
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_HEX32(0x0500006C, rx.field_id);
 }
 
 // ============================================================================
@@ -220,6 +267,59 @@ static int feed_stream(BsbFrameParser& parser, const uint8_t* bytes, size_t len,
     return frames;
 }
 
+void test_parser_keeps_the_frame_following_one_that_lost_a_byte(void) {
+    // Relevé terrain (2026-11-14 21:48) : une trame INF de l'autre maître (0x0A -> 0x00, 14 octets) est
+    // arrivée sans son dernier octet. L'automate a complété la trame avec le 0xDC de la suivante (CRC lu
+    // 0xB4DC pour 0xB43F attendu), puis a jeté le tout : la trame suivante était perdue avec elle.
+    const BsbFrame inf = BsbFrame::make_inf_room_temperature(0x0A, 0x00, fields::Z2_ROOM_TEMP_INF, 19.5f);
+    const BsbFrame get = BsbFrame::make_get(0x42, 0x00, fields::OUTDOOR_TEMP);
+    TEST_ASSERT_EQUAL_UINT8(14, inf.raw_len);
+
+    {
+        BsbFrameParser parser;
+        BsbFrame       last;
+        TEST_ASSERT_EQUAL_INT(0, feed_stream(parser, inf.raw, inf.raw_len - 1U, last));
+        TEST_ASSERT_TRUE(parser.in_frame()); // Il manque un octet : l'automate attend toujours
+
+        // Le 0xDC de la trame suivante complète la trame amputée, qui est rejetée...
+        BsbFrame parsed;
+        TEST_ASSERT_FALSE(parser.feed(get.raw[0], parsed));
+        TEST_ASSERT_EQUAL_UINT32(1, parser.crc_error_count());
+        TEST_ASSERT_EQUAL_HEX8(0x0A, parser.last_rejected().src_addr);
+        TEST_ASSERT_EQUAL_UINT8(14, parser.last_rejected().raw_len);
+        TEST_ASSERT_EQUAL_HEX8(BsbFrame::SOF_BYTE, parser.last_rejected().raw[13]);
+        TEST_ASSERT_EQUAL_HEX16(inf.crc, parser.last_rejected_computed_crc());
+        TEST_ASSERT_EQUAL_HEX16((inf.crc & 0xFF00U) | BsbFrame::SOF_BYTE, parser.last_rejected().crc);
+
+        // ... mais ce 0xDC est gardé comme début de trame : la suivante est reçue normalement
+        TEST_ASSERT_TRUE(parser.in_frame());
+        TEST_ASSERT_EQUAL_INT(1, feed_stream(parser, get.raw + 1, get.raw_len - 1U, last));
+        TEST_ASSERT_EQUAL_HEX8(0x42, last.src_addr);
+        TEST_ASSERT_EQUAL_HEX32(fields::OUTDOOR_TEMP, last.field_id);
+        TEST_ASSERT_EQUAL_UINT32(1, parser.crc_error_count());
+        TEST_ASSERT_FALSE(parser.in_frame());
+    }
+
+    // Quel que soit l'octet perdu, la trame suivante est rendue, et elle seule
+    for (uint8_t lost = 1; lost < inf.raw_len; ++lost) {
+        uint8_t stream[2 * BsbFrame::MAX_FRAME_LEN];
+        size_t  len = 0;
+        for (uint8_t i = 0; i < inf.raw_len; ++i) {
+            if (i != lost) {
+                stream[len++] = inf.raw[i];
+            }
+        }
+        memcpy(stream + len, get.raw, get.raw_len);
+        len += get.raw_len;
+
+        BsbFrameParser parser;
+        BsbFrame       last;
+        TEST_ASSERT_EQUAL_INT_MESSAGE(1, feed_stream(parser, stream, len, last), "octet perdu");
+        TEST_ASSERT_EQUAL_HEX8(0x42, last.src_addr);
+        TEST_ASSERT_EQUAL_HEX32(fields::OUTDOOR_TEMP, last.field_id);
+    }
+}
+
 void test_parser_finds_a_frame_swallowed_whole_by_a_corrupted_length(void) {
     // Longueur corrompue de 14 en 25 : la trame absorbe les 11 octets de la suivante avant d'être rejetée.
     // La relecture de ses octets retrouve la trame suivante, entière.
@@ -306,11 +406,21 @@ void test_decode_binary_states_and_modulations(void) {
     TEST_ASSERT_TRUE(v_on.valid);
     TEST_ASSERT_TRUE(v_on.bool_val);
 
-    // Pompe OFF sur RVS21 : payload = 01 00
-    const uint8_t pl_off[] = {0x01, 0x00};
-    DecodedValue v_off = build_ret_frame(fields::Z1_PUMP_STATE, pl_off, 2).decode();
+    // Pompe OFF : payload = 00 00 (relevé sur une RVS21 : compresseur et appoint à l'arrêt répondent ainsi)
+    const uint8_t pl_off[] = {0x00, 0x00};
+    DecodedValue v_off = build_ret_frame(fields::Z2_PUMP_STATE, pl_off, 2).decode();
     TEST_ASSERT_TRUE(v_off.valid);
     TEST_ASSERT_FALSE(v_off.bool_val);
+
+    // Pompe absente sur cette installation : payload = 01 00 (« --- »). Ce n'est PAS un état « arrêt » :
+    // la valeur doit être rejetée, sinon l'appareil exposerait une pompe fantôme éternellement à l'arrêt.
+    const uint8_t pl_absent[] = {0x01, 0x00};
+    DecodedValue v_absent = build_ret_frame(fields::Z1_PUMP_STATE, pl_absent, 2).decode();
+    TEST_ASSERT_FALSE(v_absent.valid);
+    TEST_ASSERT_EQUAL_HEX8(0x01, v_absent.flag_byte);
+    TEST_ASSERT_FALSE(build_ret_frame(fields::HP_PUMP_STATE, pl_absent, 2).decode().valid);
+    // Même règle pour un code d'état ou une énumération non disponible
+    TEST_ASSERT_FALSE(build_ret_frame(fields::Z1_STATUS_CODE, pl_absent, 2).decode().valid);
 
     // Pompe condenseur / circulateur principal PAC ON (8406) : payload = 00 FF
     DecodedValue v_hp_pump_on = build_ret_frame(fields::HP_PUMP_STATE, pl_on, 2).decode();
@@ -644,6 +754,31 @@ void test_heating_zero_modulation_does_not_hide_status_code(void) {
     TEST_ASSERT_FALSE(compute_heating_state(hard).zone1.heating);
 }
 
+void test_parser_accepts_err_telegram(void) {
+    // Refus du régulateur (type 0x08, charge utile = code d'erreur 7 « paramètre non pris en charge »)
+    BsbFrame err;
+    err.src_addr    = 0x00;
+    err.dst_addr    = 0x42;
+    err.command     = Command::Err;
+    err.field_id    = fields::Z1_PUMP_STATE;
+    err.payload[0]  = 0x07;
+    err.payload_len = 1;
+    err.serialize();
+
+    BsbFrameParser parser;
+    BsbFrame parsed;
+    bool ok = false;
+    for (uint8_t i = 0; i < err.raw_len; ++i) {
+        ok = parser.feed(err.raw[i], parsed);
+    }
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(Command::Err), static_cast<uint8_t>(parsed.command));
+    TEST_ASSERT_EQUAL_HEX32(fields::Z1_PUMP_STATE, parsed.field_id); // Réponse du régulateur : identifiant non permuté
+    TEST_ASSERT_EQUAL_HEX8(0x42, parsed.dst_addr);
+    // Un refus ne porte aucune valeur exploitable
+    TEST_ASSERT_FALSE(parsed.decode(ValueType::Binary).valid);
+}
+
 void test_heating_requires_flow_warmer_than_return(void) {
     // Relevé terrain (Alféa RVS21, 2026-11-13 15:15-17:15) : le régulateur annonce le compresseur en marche
     // à 100 % (8400 = ON, 8413 = 100, 8006 = 46) alors que la PAC est à l'arrêt (13 W au compteur), circuit
@@ -938,6 +1073,42 @@ void test_heating_first_verdict_after_boot_is_published_as_is(void) {
 }
 
 // ============================================================================
+// Écritures : ne pas réécrire une valeur que le régulateur a déjà
+// ============================================================================
+void test_set_frame_recognises_value_already_held_by_regulator(void) {
+    // Consigne confort Zone 2 à 19,5 °C : 19,5 * 64 = 1248 = 0x04E0
+    const BsbFrame set_temp = BsbFrame::make_set_temperature(0x42, 0x00, fields::Z2_COMFORT_SETPOINT, 19.5f);
+    const uint8_t ret_same[]      = {0x00, 0x04, 0xE0};
+    const uint8_t ret_other[]     = {0x00, 0x05, 0x00}; // 20,0 °C
+    const uint8_t ret_no_value[]  = {0x01, 0x04, 0xE0}; // « --- » : les octets de valeur ne sont qu'un remplissage
+    const uint8_t ret_too_short[] = {0x00, 0x04};
+    TEST_ASSERT_TRUE(set_temp.requests_value_of(ret_same, sizeof(ret_same)));
+    TEST_ASSERT_FALSE(set_temp.requests_value_of(ret_other, sizeof(ret_other)));
+    TEST_ASSERT_FALSE(set_temp.requests_value_of(ret_no_value, sizeof(ret_no_value)));
+    TEST_ASSERT_FALSE(set_temp.requests_value_of(ret_too_short, sizeof(ret_too_short)));
+    TEST_ASSERT_FALSE(set_temp.requests_value_of(nullptr, 3));
+
+    // Mode Zone 1 : Confort (3) demandé, régulateur déjà en Confort puis en Automatique (1)
+    const BsbFrame set_mode = BsbFrame::make_set_uint8(0x42, 0x00, fields::Z1_MODE, 3);
+    const uint8_t ret_comfort[] = {0x00, 0x03};
+    const uint8_t ret_auto[]    = {0x00, 0x01};
+    TEST_ASSERT_TRUE(set_mode.requests_value_of(ret_comfort, sizeof(ret_comfort)));
+    TEST_ASSERT_FALSE(set_mode.requests_value_of(ret_auto, sizeof(ret_auto)));
+    // Une valeur sur un octet ne se compare pas à une réponse sur deux octets
+    TEST_ASSERT_FALSE(set_mode.requests_value_of(ret_same, sizeof(ret_same)));
+
+    // Octet d'activation autre que 0x01 (paramètre désactivable) : jamais tenu pour déjà en place
+    const BsbFrame set_nullable = BsbFrame::make_set_uint8(0x42, 0x00, fields::Z1_MODE, 3, 0x06);
+    TEST_ASSERT_FALSE(set_nullable.requests_value_of(ret_comfort, sizeof(ret_comfort)));
+
+    // Seule une écriture se compare : ni une lecture, ni une injection de température
+    const BsbFrame get = BsbFrame::make_get(0x42, 0x00, fields::Z1_MODE);
+    TEST_ASSERT_FALSE(get.requests_value_of(ret_comfort, sizeof(ret_comfort)));
+    const BsbFrame inf = BsbFrame::make_inf_room_temperature(0x42, 0x00, fields::Z1_ROOM_TEMP_INF, 19.5f);
+    TEST_ASSERT_FALSE(inf.requests_value_of(ret_same, sizeof(ret_same)));
+}
+
+// ============================================================================
 // Fraîcheur des mesures : une valeur qui n'arrive plus ne reste pas affichée
 // ============================================================================
 void test_measurement_becomes_unavailable_when_no_longer_read(void) {
@@ -1150,10 +1321,12 @@ static int run_all_bsb_tests() {
     RUN_TEST(test_frame_make_set_temperature);
     RUN_TEST(test_frame_make_set_uint8_mode);
     RUN_TEST(test_frame_make_inf_room_temperature);
+    RUN_TEST(test_inf_field_id_swap_depends_on_destination);
     RUN_TEST(test_parser_valid_ret_temperature_positive_and_negative);
     RUN_TEST(test_parser_cozytouch_snooping_get_unswaps_field_id);
     RUN_TEST(test_parser_rejects_bad_crc_and_recovers);
     RUN_TEST(test_parser_resynchronizes_on_bus_noise_and_invalid_length);
+    RUN_TEST(test_parser_keeps_the_frame_following_one_that_lost_a_byte);
     RUN_TEST(test_parser_finds_a_frame_swallowed_whole_by_a_corrupted_length);
     RUN_TEST(test_parser_is_not_fooled_by_a_data_byte_that_looks_like_a_frame_start);
     RUN_TEST(test_parser_finds_a_frame_starting_inside_a_rejected_header);
@@ -1179,6 +1352,8 @@ static int run_all_bsb_tests() {
     RUN_TEST(test_heating_guard_only_refutes_an_actual_zone_demand);
     RUN_TEST(test_heating_start_is_published_only_once_confirmed);
     RUN_TEST(test_heating_first_verdict_after_boot_is_published_as_is);
+    RUN_TEST(test_parser_accepts_err_telegram);
+    RUN_TEST(test_set_frame_recognises_value_already_held_by_regulator);
     RUN_TEST(test_measurement_becomes_unavailable_when_no_longer_read);
     RUN_TEST(test_measurement_answered_without_value_is_unavailable_at_once);
     RUN_TEST(test_measurement_watch_reports_every_expired_field_even_with_a_small_buffer);
