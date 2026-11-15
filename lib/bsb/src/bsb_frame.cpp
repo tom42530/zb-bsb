@@ -1,7 +1,3 @@
-#if defined(ESP_PLATFORM)
-#include <Arduino.h>
-#include "esp_log.h"
-#endif
 #include "bsb_frame.h"
 #include <cmath>
 #include <cstdio>
@@ -276,9 +272,72 @@ void BsbFrameParser::reset() {
     payload_idx_  = 0;
     working_.raw_len     = 0;
     working_.payload_len = 0;
+    candidate_from_rescan_ = false;
 }
 
 bool BsbFrameParser::feed(uint8_t byte, BsbFrame& out_frame) {
+    const Step result = step(byte, out_frame);
+    if (result == Step::Frame) {
+        return true;
+    }
+    if (result == Step::NeedMore) {
+        return false;
+    }
+
+    if (result == Step::BadCrc && !candidate_from_rescan_) {
+        crc_error_count_++;
+        rejected_              = working_;
+        rejected_computed_crc_ = BsbFrame::compute_crc16(working_.raw, working_.raw_len - 2);
+    }
+    return rescan_rejected(out_frame);
+}
+
+bool BsbFrameParser::rescan_rejected(BsbFrame& out_frame) {
+    // L'automate va resservir : les octets de la trame rejetée sont mis de côté
+    uint8_t       stream[BsbFrame::MAX_FRAME_LEN];
+    const uint8_t stream_len = working_.raw_len;
+    memcpy(stream, working_.raw, stream_len);
+
+    bool     found = false;
+    BsbFrame candidate;
+    uint8_t  from = 1; // Le 0xDC de tête vient d'être jugé : la relecture commence après lui
+    while (from < stream_len) {
+        if (stream[from] != BsbFrame::SOF_BYTE) {
+            ++from;
+            continue;
+        }
+
+        // Début de trame possible : relecture depuis cet octet jusqu'au dernier octet reçu
+        reset();
+        bool rejected_again = false;
+        for (uint8_t i = from; i < stream_len; ++i) {
+            const Step result = step(stream[i], candidate);
+            if (result == Step::Frame) {
+                if (!found) {
+                    out_frame = candidate;
+                    found     = true;
+                    recovered_count_++;
+                }
+            } else if (result != Step::NeedMore) {
+                // Ce début de trame-là ne tient pas non plus : on repart du 0xDC qui suit le sien.
+                // Il a absorbé working_.raw_len octets, dont stream[i] est le dernier.
+                from           = static_cast<uint8_t>(i + 2 - working_.raw_len);
+                rejected_again = true;
+                break;
+            }
+        }
+        if (!rejected_again) {
+            // Tout a été relu : l'automate garde la trame en cours, que les prochains octets complèteront
+            candidate_from_rescan_ = in_frame();
+            return found;
+        }
+    }
+
+    reset();
+    return found;
+}
+
+BsbFrameParser::Step BsbFrameParser::step(uint8_t byte, BsbFrame& out_frame) {
     switch (state_) {
         case State::WaitSof:
             if (byte == BsbFrame::SOF_BYTE) {
@@ -292,15 +351,17 @@ bool BsbFrameParser::feed(uint8_t byte, BsbFrame& out_frame) {
         case State::SrcAddr:
             if (byte == BsbFrame::SOF_BYTE) {
                 // Resynchronisation immédiate si deux 0xDC se suivent
-                working_         = BsbFrame{};
-                working_.raw[0]  = byte;
-                working_.raw_len = 1;
-                state_           = State::SrcAddr;
+                working_               = BsbFrame{};
+                working_.raw[0]        = byte;
+                working_.raw_len       = 1;
+                state_                 = State::SrcAddr;
+                candidate_from_rescan_ = false;
             } else if ((byte & 0x80) != 0) {
                 working_.raw[working_.raw_len++] = byte;
                 working_.src_addr                = static_cast<uint8_t>(byte & 0x7F);
                 state_                           = State::DstAddr;
             } else {
+                // Ni adresse source ni début de trame : rien à relire dans ces deux octets
                 reset();
             }
             break;
@@ -312,19 +373,13 @@ bool BsbFrameParser::feed(uint8_t byte, BsbFrame& out_frame) {
             break;
 
         case State::Length:
+            working_.raw[working_.raw_len++] = byte;
             // Validation stricte de la taille pour éviter tout blocage sur octet bruité
             if (byte < BsbFrame::HEADER_NO_PL || byte > BsbFrame::MAX_FRAME_LEN) {
-                reset();
-                if (byte == BsbFrame::SOF_BYTE) {
-                    working_.raw[0]  = byte;
-                    working_.raw_len = 1;
-                    state_           = State::SrcAddr;
-                }
-            } else {
-                working_.raw[working_.raw_len++] = byte;
-                expected_len_                    = byte;
-                state_                           = State::CommandByte;
+                return Step::BadHeader;
             }
+            expected_len_ = byte;
+            state_        = State::CommandByte;
             break;
 
         case State::CommandByte:
@@ -387,27 +442,19 @@ bool BsbFrameParser::feed(uint8_t byte, BsbFrame& out_frame) {
             state_                           = State::CrcLsb;
             break;
 
-        case State::CrcLsb: {
+        case State::CrcLsb:
             working_.raw[working_.raw_len++] = byte;
             working_.crc                    |= static_cast<uint16_t>(byte);
 
-            const uint16_t calc_crc = BsbFrame::compute_crc16(working_.raw, working_.raw_len - 2);
-            const bool crc_ok = (calc_crc == working_.crc);
-            if (crc_ok) {
-                out_frame = working_;
-            } else {
-#if defined(ESP_PLATFORM)
-                ESP_LOGW("bsb.frame", "[CRC ERR] src=0x%02X dst=0x%02X cmd=0x%02X len=%u calc=0x%04X != rx=0x%04X",
-                         working_.src_addr, working_.dst_addr, static_cast<unsigned>(working_.command),
-                         working_.raw_len, calc_crc, working_.crc);
-#endif
+            if (BsbFrame::compute_crc16(working_.raw, working_.raw_len - 2) != working_.crc) {
+                return Step::BadCrc;
             }
+            out_frame = working_;
             reset();
-            return crc_ok;
-        }
+            return Step::Frame;
     }
 
-    return false;
+    return Step::NeedMore;
 }
 
 } // namespace bsb

@@ -206,6 +206,85 @@ void test_parser_resynchronizes_on_bus_noise_and_invalid_length(void) {
     TEST_ASSERT_EQUAL_HEX32(fields::OUTDOOR_TEMP, parsed.field_id);
 }
 
+// Passe un flux d'octets dans l'automate et compte les trames rendues (la dernière reste dans `last`)
+static int feed_stream(BsbFrameParser& parser, const uint8_t* bytes, size_t len, BsbFrame& last) {
+    int frames = 0;
+    for (size_t i = 0; i < len; ++i) {
+        BsbFrame parsed;
+        if (parser.feed(bytes[i], parsed)) {
+            last = parsed;
+            ++frames;
+        }
+    }
+    return frames;
+}
+
+void test_parser_finds_a_frame_swallowed_whole_by_a_corrupted_length(void) {
+    // Longueur corrompue de 14 en 25 : la trame absorbe les 11 octets de la suivante avant d'être rejetée.
+    // La relecture de ses octets retrouve la trame suivante, entière.
+    const uint8_t pl[]    = {0x00, 0x0B, 0x00}; // 44.0 °C
+    BsbFrame      damaged = build_ret_frame(fields::DHW_TANK_TEMP, pl, sizeof(pl));
+    const BsbFrame get    = BsbFrame::make_get(0x0A, 0x00, fields::HP_FLOW_TEMP);
+    damaged.raw[3] = static_cast<uint8_t>(damaged.raw_len + get.raw_len);
+
+    uint8_t stream[2 * BsbFrame::MAX_FRAME_LEN];
+    memcpy(stream, damaged.raw, damaged.raw_len);
+    memcpy(stream + damaged.raw_len, get.raw, get.raw_len);
+
+    BsbFrameParser parser;
+    BsbFrame       last;
+    TEST_ASSERT_EQUAL_INT(1, feed_stream(parser, stream, static_cast<size_t>(damaged.raw_len) + get.raw_len, last));
+    TEST_ASSERT_EQUAL_HEX8(0x0A, last.src_addr);
+    TEST_ASSERT_EQUAL_HEX32(fields::HP_FLOW_TEMP, last.field_id);
+    TEST_ASSERT_EQUAL_UINT32(1, parser.crc_error_count());
+    TEST_ASSERT_EQUAL_UINT32(1, parser.recovered_count());
+    TEST_ASSERT_FALSE(parser.in_frame());
+}
+
+void test_parser_is_not_fooled_by_a_data_byte_that_looks_like_a_frame_start(void) {
+    // La trame amputée contient 0xDC dans ses données, suivi d'octets qui forment un en-tête plausible
+    // (source 0x80, destination 0x00, longueur 11). La relecture part d'abord de ce faux début, qui absorbe
+    // le commencement de la vraie trame suivante avant d'échouer : celle-ci doit être retrouvée quand même,
+    // et cet essai manqué ne compte pas comme une seconde erreur du bus.
+    const uint8_t pl[]     = {0x00, 0xDC, 0x80, 0x00, 0x0B, 0x01};
+    const BsbFrame damaged = build_ret_frame(fields::CONTROLLER_MODEL, pl, sizeof(pl));
+    const BsbFrame get     = BsbFrame::make_get(0x42, 0x00, fields::HP_RETURN_TEMP);
+
+    uint8_t stream[2 * BsbFrame::MAX_FRAME_LEN];
+    size_t  len = damaged.raw_len - 1U; // Dernier octet perdu
+    memcpy(stream, damaged.raw, len);
+    memcpy(stream + len, get.raw, get.raw_len);
+    len += get.raw_len;
+
+    BsbFrameParser parser;
+    BsbFrame       last;
+    TEST_ASSERT_EQUAL_INT(1, feed_stream(parser, stream, len, last));
+    TEST_ASSERT_EQUAL_HEX8(0x42, last.src_addr);
+    TEST_ASSERT_EQUAL_HEX32(fields::HP_RETURN_TEMP, last.field_id);
+    TEST_ASSERT_EQUAL_UINT32(1, parser.crc_error_count());
+
+    // Et le flux reste sain ensuite
+    const BsbFrame next = BsbFrame::make_get(0x42, 0x00, fields::OUTDOOR_TEMP);
+    TEST_ASSERT_EQUAL_INT(1, feed_stream(parser, next.raw, next.raw_len, last));
+    TEST_ASSERT_EQUAL_HEX32(fields::OUTDOOR_TEMP, last.field_id);
+    TEST_ASSERT_EQUAL_UINT32(1, parser.crc_error_count());
+}
+
+void test_parser_finds_a_frame_starting_inside_a_rejected_header(void) {
+    // Deux octets parasites « DC 8A » juste avant une vraie trame : son 0xDC est pris pour une adresse de
+    // destination, son octet suivant pour une longueur impossible. L'en-tête est rejeté, la trame retrouvée.
+    const BsbFrame get      = BsbFrame::make_get(0x42, 0x00, fields::OUTDOOR_TEMP);
+    const uint8_t  glitch[] = {0xDC, 0x8A};
+
+    BsbFrameParser parser;
+    BsbFrame       last;
+    TEST_ASSERT_EQUAL_INT(0, feed_stream(parser, glitch, sizeof(glitch), last));
+    TEST_ASSERT_EQUAL_INT(1, feed_stream(parser, get.raw, get.raw_len, last));
+    TEST_ASSERT_EQUAL_HEX8(0x42, last.src_addr);
+    TEST_ASSERT_EQUAL_HEX32(fields::OUTDOOR_TEMP, last.field_id);
+    TEST_ASSERT_EQUAL_UINT32(0, parser.crc_error_count()); // Aucune trame complète n'a été rejetée
+}
+
 // ============================================================================
 // 7. Tests du décodage Chaîne (6224), Binaire (8400/8730) et Modulation (8413)
 // ============================================================================
@@ -299,6 +378,9 @@ static int run_all_bsb_tests() {
     RUN_TEST(test_parser_cozytouch_snooping_get_unswaps_field_id);
     RUN_TEST(test_parser_rejects_bad_crc_and_recovers);
     RUN_TEST(test_parser_resynchronizes_on_bus_noise_and_invalid_length);
+    RUN_TEST(test_parser_finds_a_frame_swallowed_whole_by_a_corrupted_length);
+    RUN_TEST(test_parser_is_not_fooled_by_a_data_byte_that_looks_like_a_frame_start);
+    RUN_TEST(test_parser_finds_a_frame_starting_inside_a_rejected_header);
     RUN_TEST(test_decode_controller_model_string_strips_null);
     RUN_TEST(test_decode_binary_states_and_modulations);
     RUN_TEST(test_autodiscovery_sentinel_filtering);

@@ -89,6 +89,12 @@ struct BsbFrame {
 /**
  * @brief Automate à états finis robuste pour le décodage flux octet-par-octet du bus BSB.
  *        Protégé contre les trames tronquées, les dépassements de tampon et le bruit sur le bus.
+ *
+ * Le flux n'a pas d'autre repère que l'octet 0xDC, qui peut aussi figurer dans les données. Quand une
+ * trame est rejetée (en-tête impossible ou CRC faux), les octets qu'elle a absorbés ne sont donc pas
+ * jetés : ils sont relus à partir du 0xDC suivant qu'ils contiennent. Sans cela, une trame amputée d'un
+ * octet (octet perdu, émetteur qui cède le bus) se complète avec le début de la suivante et l'entraîne
+ * dans son rejet : un seul octet manquant coûterait deux trames.
  */
 class BsbFrameParser {
 public:
@@ -101,10 +107,42 @@ public:
      * @param byte Octet logique BSB
      * @param out_frame Rempli si une trame complète avec CRC valide vient d'être reçue
      * @return true lorsqu'une trame complète et valide est prête dans `out_frame`
+     *
+     * Un appel rend au plus une trame. Si la relecture d'une trame rejetée en révélait deux d'un coup
+     * (il faut qu'une longueur corrompue en ait absorbé deux entières), seule la première est rendue.
      */
     bool feed(uint8_t byte, BsbFrame& out_frame);
 
+    /** true tant qu'une trame est en cours de réception (0xDC reçu, trame pas encore complète). */
+    bool in_frame() const { return state_ != State::WaitSof; }
+
+    /** Trames complètes rejetées pour CRC faux (les essais de resynchronisation qui échouent ne comptent pas). */
+    uint32_t crc_error_count() const { return crc_error_count_; }
+
+    /** Trames valides retrouvées dans les octets d'une trame rejetée. */
+    uint32_t recovered_count() const { return recovered_count_; }
+
+    /**
+     * @brief Dernière trame rejetée pour CRC faux, telle qu'elle a été reçue (diagnostic) : `raw`, `raw_len`,
+     *        adresses et commande sont renseignés, `crc` porte le CRC lu.
+     */
+    const BsbFrame& last_rejected() const { return rejected_; }
+
+    /** CRC calculé sur les octets de la dernière trame rejetée (à comparer à `last_rejected().crc`). */
+    uint16_t last_rejected_computed_crc() const { return rejected_computed_crc_; }
+
 private:
+    /** Issue du traitement d'un octet par l'automate. */
+    enum class Step : uint8_t {
+        NeedMore,  // Trame en cours, ou octet hors trame ignoré
+        Frame,     // Trame complète et valide rendue
+        BadHeader, // Longueur impossible : les octets absorbés sont dans working_
+        BadCrc     // Trame complète au CRC faux : ses octets sont dans working_
+    };
+
+    Step step(uint8_t byte, BsbFrame& out_frame);
+    bool rescan_rejected(BsbFrame& out_frame);
+
     enum class State : uint8_t {
         WaitSof,
         SrcAddr,
@@ -124,6 +162,14 @@ private:
     BsbFrame working_      = {};
     uint8_t  expected_len_ = 0;
     uint8_t  payload_idx_  = 0;
+    // La trame en cours a commencé dans des octets relus après un rejet : si elle est rejetée à son
+    // tour, c'est un essai de resynchronisation qui échoue, pas une nouvelle erreur sur le bus.
+    bool     candidate_from_rescan_ = false;
+
+    uint32_t crc_error_count_       = 0;
+    uint32_t recovered_count_       = 0;
+    BsbFrame rejected_              = {};
+    uint16_t rejected_computed_crc_ = 0;
 };
 
 } // namespace bsb
