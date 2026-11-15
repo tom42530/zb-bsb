@@ -18,6 +18,10 @@ on:
         default: "Publication Zigbee OTA générée automatiquement via GitHub Actions."
         type: string
 
+# Jeton en lecture seule par défaut ; seul le job de publication obtient l'écriture
+permissions:
+  contents: read
+
 jobs:
   unit-tests:
     name: Native BSB Protocol Unit Tests
@@ -180,6 +184,6 @@ jobs:
           ```yaml
           action: zha_toolkit.ota_notify
           data:
-            ieee: 10:bd:a3:ff:fe:a1:83:28
+            ieee: <IEEE_DE_VOTRE_APPAREIL>
           ```
           EOF
