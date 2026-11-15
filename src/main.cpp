@@ -145,6 +145,9 @@ static void record_boot() {
 
 static void check_boot_button() {
     if (zb_bsb::ZbBridge::instance().is_ota_in_progress()) {
+        // Bouton ignoré pendant une mise à jour. L'appui en cours est oublié : sinon, à la fin du
+        // transfert, sa durée engloberait tout l'OTA et déclencherait un reset usine intempestif.
+        g_btn_pressed = false;
         return;
     }
     const bool pressed_now = (gpio_get_level(zb_bsb::board::PIN_BOOT_BUTTON) == 0);
