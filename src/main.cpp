@@ -11,6 +11,13 @@
 
 static const char* TAG = "zb_bsb.main";
 
+// Tampon d'émission de la console USB : assez grand pour un diagnostic complet (~2 ko) et le journal
+// de démarrage, car l'écriture est non bloquante (ce qui ne tient pas dans le tampon est perdu).
+static constexpr size_t SERIAL_TX_BUFFER_SIZE = 8192;
+
+// Période de contrôle du tampon de la console (voir maintain_serial_console())
+static constexpr uint32_t SERIAL_STALL_CHECK_MS = 5000;
+
 static bsb::BsbBus          g_bsb_bus;
 static bsb::BsbCapabilities g_caps;
 static uint32_t             g_last_diag_ms = 0;
@@ -123,8 +130,49 @@ static void update_status_led() {
     }
 }
 
+/**
+ * @brief Garde la console USB utile quand plus personne ne la lit.
+ *
+ * Tant qu'un PC reste branché après la fermeture du moniteur série, le pilote USB considère la liaison
+ * comme active : le tampon d'émission se remplit, les nouveaux messages sont perdus, et la réouverture
+ * du moniteur n'afficherait que de vieux messages. Un tampon resté plein plusieurs secondes signifie
+ * que personne ne lit : on le vide, ce qui fait repasser le pilote dans son mode « conserver les
+ * messages les plus récents » jusqu'à la prochaine lecture.
+ */
+static void maintain_serial_console() {
+#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+    static uint32_t s_last_check_ms = 0;
+    static uint8_t  s_full_checks   = 0;
+
+    const uint32_t now = millis();
+    if (now - s_last_check_ms < SERIAL_STALL_CHECK_MS) {
+        return;
+    }
+    s_last_check_ms = now;
+
+    if (Serial.availableForWrite() < static_cast<int>(SERIAL_TX_BUFFER_SIZE / 8)) {
+        if (++s_full_checks >= 2) {
+            s_full_checks = 0;
+            Serial.flush(); // Avec un délai d'émission nul : vide le tampon et marque la console « non lue »
+        }
+    } else {
+        s_full_checks = 0;
+    }
+#endif
+}
+
 void setup() {
+#if ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+    // La console USB ne doit JAMAIS ralentir la passerelle. Par défaut, dès qu'un PC est branché sans
+    // qu'aucun programme ne lise le port (moniteur série refermé), chaque caractère de journal attend
+    // jusqu'à 100 ms une place dans le tampon : la boucle BSB et la tâche Zigbee se figent, puis le
+    // chien de garde redémarre l'appareil. Écriture non bloquante : ce qui ne tient pas est perdu.
+    Serial.setTxBufferSize(SERIAL_TX_BUFFER_SIZE);
     Serial.begin(115200);
+    Serial.setTxTimeoutMs(0);
+#else
+    Serial.begin(115200);
+#endif
     // Redirige tous les logs ESP-IDF (ESP_LOGI, ESP_LOGW, etc.) vers la console USB CDC
     Serial.setDebugOutput(true);
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -242,6 +290,9 @@ void loop() {
                  static_cast<unsigned long>(g_bsb_bus.collision_avoided_count()),
                  zb_bsb::ZbBridge::instance().is_connected() ? "CONNECTE" : "EN RECHERCHE");
     }
+
+    // Console série de diagnostic (USB)
+    maintain_serial_console();
 
     delay(5);
 }
