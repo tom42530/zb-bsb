@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "bsb_status.h"
 
 namespace bsb {
 
@@ -174,11 +175,9 @@ struct DecodedValue {
 // ============================================================================
 // Fonctions utilitaires de traduction, validation sentinelle et métadonnées
 // ============================================================================
+// (les tables de codes statut 8000 / 8001 / 8003 / 8006 sont dans bsb_status.h)
 ValueType   get_field_value_type(uint32_t field_id);
 const char* get_field_name(uint32_t field_id);
-const char* get_hp_status_text_fr(uint16_t code);
-const char* get_zone_status_text_fr(uint16_t code);
-const char* get_dhw_status_text_fr(uint16_t code);
 
 /**
  * @brief Vérifie si une mesure de sonde d'ambiance est physiquement valide
