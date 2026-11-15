@@ -22,6 +22,20 @@ blueprint:
       selector:
         entity:
           domain: number
+    max_age_minutes:
+      name: "Âge maximal de la mesure (minutes)"
+      description: >
+        Si la sonde n'a plus donné signe de vie depuis plus longtemps que cette durée (pile vide, capteur hors
+        de portée), sa dernière valeur n'est plus retransmise. Sans rafraîchissement pendant 30 minutes, le
+        ZB-BSB revient alors de lui-même sur la mesure du régulateur. Augmentez cette durée pour une sonde qui
+        ne publie que rarement lorsque la température est stable.
+      default: 180
+      selector:
+        number:
+          min: 15
+          max: 1440
+          unit_of_measurement: min
+          mode: box
 
 mode: restart
 max_exceeded: silent
@@ -33,17 +47,33 @@ trigger:
     minutes: "/10"
   - platform: homeassistant
     event: start
+  # Le ZB-BSB vient de redémarrer (ou a désactivé la sonde faute de nouvelles) : l'entité repasse à 0,
+  # ou revient d'indisponible. La température est renvoyée aussitôt, sans attendre le rappel périodique.
+  # Pour couper volontairement la sonde externe, désactivez cette automatisation puis réglez l'entité sur 0.
+  - platform: state
+    entity_id: !input target_zb_bsb_number
+    to: "0.0"
+  - platform: state
+    entity_id: !input target_zb_bsb_number
+    from: "unavailable"
 
 variables:
   sensor_entity: !input external_temp_sensor
+  max_age_minutes: !input max_age_minutes
   raw_state: "{{ states(sensor_entity) }}"
 
 condition:
+  # La valeur doit être numérique, plausible ET récente : le rappel périodique (toutes les 10 minutes) ne
+  # doit pas maintenir « en vie » une sonde morte dont Home Assistant conserve simplement le dernier état.
   - condition: template
     value_template: >
+      {% set s = states[sensor_entity] %}
+      {% set seen = (s.last_reported | default(s.last_updated)) if s is not none else none %}
       {{ raw_state not in ['unknown', 'unavailable', 'none', '']
          and (raw_state | float(-99)) >= 5.0
-         and (raw_state | float(-99)) <= 35.0 }}
+         and (raw_state | float(-99)) <= 35.0
+         and seen is not none
+         and (now() - seen).total_seconds() <= (max_age_minutes | int(180)) * 60 }}
 
 action:
   - service: number.set_value
