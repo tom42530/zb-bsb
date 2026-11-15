@@ -64,71 +64,181 @@ class RobustIntEnum(IntEnum):
 
 
 class PacStatusEnum(RobustIntEnum):
+    """Prog 8006 - Etat pompe a chaleur (table Siemens ENUM8006)."""
+
     Inactif = 0
-    Arret_verrouillage = 3
-    Protection_antigel_PAC = 35
-    Degivrage_ventilateur = 38
-    Degivrage_actif = 39
-    Egouttage_degivrage = 41
-    Prechauffage_compresseur = 43
-    En_fonctionnement = 44
-    Chauffage_compresseur_appoint = 46
-    Chauffage_compresseur = 49
-    Verrouillage_compresseur = 50
-    Arret_pas_de_demande = 51
-    Delestage_electrique_actif = 52
-    Pre_ventilation_pompe = 113
-    Fonctionnement_puissance_min = 123
-    Limitation_courant_evaporateur = 124
-    Limitation_puissance_maximale = 125
-    Limitation_protection = 126
-    Tempo_min_fonctionnement = 127
-    Temps_min_arret_compresseur = 128
-    Post_fonctionnement_pompe = 129
+    Defaut = 2
+    Verrouille = 10
+    Post_circulation_active = 17
+    Hors_gel_installation_actif = 23
+    Protection_hors_gel_active = 24
+    Arret = 25
+    Mode_secours = 26
+    Verrouille_externe = 27
+    Haute_pression = 29
+    Controleur_debit_source = 30
+    Pressostat_source = 31
+    Limitation_gaz_chauds_compresseur_1 = 32
+    Limitation_gaz_chauds_compresseur_2 = 33
+    Limitation_temp_coupure_max = 34
+    Temps_arret_min_compresseur = 35
+    Compensation_excedent_chaleur = 36
+    Temps_limitation_actif = 37
+    Temps_marche_min_compresseur = 38
+    Compensation_deficit_chaleur = 39
+    Limitation_ecart_condenseur_max = 40
+    Limitation_ecart_condenseur_min = 41
+    Limitation_ecart_evaporateur_max = 42
+    Limitation_ecart_evaporateur_min = 43
+    Compresseur_et_appoint_en_marche = 44
+    Compresseurs_1_et_2_en_marche = 45
+    Compresseur_1_en_marche = 46
+    Compresseur_2_en_marche = 47
+    Hors_gel_pompe_a_chaleur = 48
+    Pre_circulation_active = 49
+    Liberee_compresseur_pret = 50
+    Pas_de_demande = 51
+    Degivrage_actif = 125
+    Egouttage = 126
+    Rafraichissement_actif = 127
+    Rafraichissement_passif = 128
+    Refroidissement_evaporateur = 129
+    Prechauffage_degivrage = 130
+    Regime_de_chauffe = 137
+    Limitation_temp_coupure_min = 139
+    Limitation_temp_ext_max_rafraichissement = 145
+    Verrouille_temperature_exterieure = 176
+    Triphase_asymetrique = 180
+    Basse_pression = 181
+    Surcharge_ventilateur = 182
+    Surcharge_compresseur_1 = 183
+    Surcharge_compresseur_2 = 184
+    Surcharge_pompe_source = 185
+    Controleur_debit_consommateurs = 186
+    Limite_utilisation_temp_ext_min = 187
+    Limite_utilisation_temp_ext_max = 188
+    Limitation_temp_source_min_eau = 189
+    Limitation_temp_source_min_eau_glycolee = 190
+    Limitation_temp_source_max = 191
+    Degivrage_force_compresseur = 192
+    Degivrage_force_ventilateur = 193
+    Degivrage_par_compresseur = 194
+    Degivrage_par_ventilateur = 195
+    Limitation_temp_source_min_rafraichissement = 196
+    Appoint_electrique_en_marche = 197
+    Verrouille_mode_eco = 198
+    Temps_marche_min_compresseur_rafraichissement = 207
+    Compresseurs_1_et_2_rafraichissement = 208
+    Compresseur_1_rafraichissement = 209
+    Compresseur_2_rafraichissement = 210
+    Pression_eau_trop_basse = 235
+    Destratification_active = 242
+    Sous_tension_reseau = 246
+    Recuperation_fluide_manuelle = 254
     Autre_code_statut = 255
+    Recuperation_fluide = 256
+    Temporisation_demarrage_degivrage = 257
+    Compresseur_verrouille = 258
+    Verrouille_temp_source_max = 259
+    Verrouille_temp_source_min = 260
+    Verrouille_temp_retour_max = 261
+    Verrouille_temp_retour_min = 262
+    Verrouille_temp_depart_max = 263
+    Verrouille_temp_depart_min = 264
+    Verrouille_temp_condenseur_max = 265
+    Verrouille_temp_evaporateur_min = 266
+    Verrouille_temp_gaz_chauds_max = 267
+    Limitation_temp_evaporation_min = 268
+    Limitation_temp_condensation_max = 269
+    Limitation_temp_evaporation_max = 270
 
 
 class ZoneStatusEnum(RobustIntEnum):
+    """Prog 8000 / 8001 - Etat circuit chauffage (table Siemens ENUM8000).
+
+    Seuls les etats 4, 56, 101, 102, 107 a 114, 116 et 117 correspondent a une demande de chaleur :
+    le firmware n'annonce la zone "en chauffe" que dans ces etats, generateur en marche.
+    Les codes 22 a 25 (hors-gel / arret) different selon les generations de regulateurs.
+    """
+
     Inactif = 0
-    Protection_antigel_active = 17
-    Arret_mode_hors_gel = 25
-    Chauffage_force = 95
-    Regime_confort = 101
-    Regime_reduit = 102
-    Protection_antigel_ambiante = 103
-    Arret_consigne_atteinte = 104
-    Sechage_dalle_actif = 106
-    En_veille_pas_de_demande = 114
-    Adaptation_optimisation_debut = 115
-    Adaptation_optimisation_fin = 116
-    Adaptation_abaissement_actif = 117
-    En_demande_de_chauffage = 118
-    Prechauffage_confort = 119
-    Maintien_abaissement = 120
-    Arret_automatique_ete = 121
-    Abaissement_reduit = 122
-    Limitation_depart_active = 125
+    Thermostat_limiteur_declenche = 3
+    Regime_manuel_actif = 4
+    Post_circulation_active = 17
+    Hors_gel_installation_actif = 22
+    Protection_hors_gel_active = 23
+    Arret_ou_hors_gel = 24
+    Arret = 25
+    Protection_surchauffe_active = 56
+    Hors_gel_ambiance_actif = 101
+    Sechage_dalle_actif = 102
+    Restreint_protection_generateur = 103
+    Restreint_priorite_ECS = 104
+    Restreint_ballon_tampon = 105
+    Chauffage_restreint = 106
+    Evacuation_forcee_tampon = 107
+    Evacuation_forcee_ECS = 108
+    Evacuation_forcee_generateur = 109
+    Evacuation_forcee = 110
+    Optimisation_enclenchement_et_chauffe_acceleree = 111
+    Optimisation_enclenchement = 112
+    Chauffe_acceleree = 113
+    Chauffage_confort = 114
+    Optimisation_coupure = 115
+    Chauffage_reduit = 116
+    Hors_gel_depart_actif = 117
+    Regime_ete = 118
+    Eco_journalier_actif = 119
+    Abaissement_reduit = 120
+    Abaissement_hors_gel = 121
+    Limitation_temperature_ambiante = 122
+    Marche_continue_pompe = 248
     Autre_code_statut = 255
 
 
 class DhwStatusEnum(RobustIntEnum):
+    """Prog 8003 - Etat eau chaude sanitaire (table Siemens ENUM8003)."""
+
     Inactif = 0
-    Arret_ECS_desactivee = 25
-    Protection_antigel_ECS = 58
-    Charge_forcee_legionellose = 61
-    Charge_ECS_active = 63
-    Charge_appoint_electrique = 66
-    Charge_complementaire = 67
-    Post_circulation_pompe_ECS = 69
-    Charge_legionellose_atteinte = 92
-    En_charge_PAC = 93
-    En_charge_appoint = 94
-    Charge_prete = 96
-    En_charge = 97
-    Charge_refroidissement = 98
-    Charge_temperature_atteinte = 99
-    En_attente_maintien = 100
-    Limitation_puissance_ECS = 125
+    Thermostat_limiteur_declenche = 3
+    Regime_manuel_actif = 4
+    Post_circulation_active = 17
+    Protection_hors_gel_active = 24
+    Arret = 25
+    Refroidissement_actif = 53
+    Charge_resistance_electrique = 66
+    Charge_forcee_active = 67
+    Charge_active = 69
+    Charge_terminee_temp_max_ballon = 70
+    Charge_terminee_temp_max_charge = 71
+    Charge_terminee = 75
+    Refroidissement_par_collecteur = 77
+    Refroidissement_par_generateur = 78
+    Protection_decharge_active = 79
+    Limitation_duree_charge_active = 80
+    Charge_verrouillee = 81
+    Verrouillage_charge_actif = 82
+    Charge_forcee_temp_max_ballon = 83
+    Charge_forcee_temp_max_charge = 84
+    Charge_forcee_consigne_legionelles = 85
+    Charge_forcee_consigne_nominale = 86
+    Charge_electrique_consigne_legionelles = 87
+    Charge_electrique_consigne_nominale = 88
+    Charge_electrique_consigne_reduite = 89
+    Charge_electrique_consigne_hors_gel = 90
+    Resistance_electrique_liberee = 91
+    Push_consigne_legionelles = 92
+    Push_consigne_nominale = 93
+    Push_actif = 94
+    En_charge_consigne_legionelles = 95
+    En_charge_consigne_nominale = 96
+    En_charge_consigne_reduite = 97
+    Charge_terminee_temp_legionelles = 98
+    Charge_terminee_temp_nominale = 99
+    Charge_terminee_temp_reduite = 100
+    Soutirage = 199
+    Pret = 200
+    Charge_de_maintien = 201
     Autre_code_statut = 255
 
 
@@ -211,6 +321,8 @@ try:
     PRESET_ECO = Preset.ECO if hasattr(Preset, "ECO") else "eco"
     PRESET_FROST = "frost_protection"
     PRESET_AUTO = "auto"
+    # Valeur « mesure indisponible » d'une température ZCL sur 16 bits signés (0x8000)
+    ZCL_INVALID_TEMPERATURE = -32768
 
     @register_entity(ThermostatCluster.cluster_id)
     class AtlanticSiemensThermostat(Thermostat):
@@ -289,6 +401,18 @@ try:
         def target_temperature_step(self) -> float:
             """Incrément de consigne (0.5 °C)."""
             return 0.5
+
+        @property
+        def current_temperature(self) -> float | None:
+            """Température mesurée, ou None si la passerelle n'en a pas.
+
+            Quand le régulateur ne fournit plus la mesure (bus BSB coupé, sonde en défaut), le firmware
+            publie la valeur invalide ZCL 0x8000. Sans ce filtre, la carte afficherait -327,7 °C.
+            """
+            raw = self._local_temperature
+            if raw is None or raw == ZCL_INVALID_TEMPERATURE:
+                return None
+            return raw / ZCL_TEMP
 
         @property
         def hvac_mode(self) -> HVACMode | None:
