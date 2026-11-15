@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
@@ -18,11 +19,20 @@ static constexpr size_t SERIAL_TX_BUFFER_SIZE = 8192;
 // Période de contrôle du tampon de la console (voir maintain_serial_console())
 static constexpr uint32_t SERIAL_STALL_CHECK_MS = 5000;
 
+// Compteurs de démarrage persistants (diagnostic de terrain : l'appareil a-t-il planté depuis son installation ?)
+struct BootStats {
+    uint32_t boots         = 0; // Nombre total de démarrages
+    uint32_t abnormal      = 0; // Dont démarrages après panne (panic, chien de garde, chute de tension)
+    uint8_t  last_abnormal = 0; // Cause du dernier démarrage anormal (esp_reset_reason_t), 0 = aucun
+};
+
 static bsb::BsbBus          g_bsb_bus;
 static bsb::BsbCapabilities g_caps;
 static uint32_t             g_last_diag_ms = 0;
 static uint32_t             g_btn_press_start_ms = 0;
 static bool                 g_btn_pressed = false;
+static esp_reset_reason_t   g_reset_reason = ESP_RST_UNKNOWN;
+static BootStats            g_boot_stats;
 
 /**
  * @brief Profil de secours (non sauvegardé en NVS) utilisé uniquement si l'ESP32-C6
@@ -68,6 +78,69 @@ static void init_nvs() {
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+}
+
+static const char* reset_reason_text(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:    return "mise sous tension";
+        case ESP_RST_EXT:        return "broche reset";
+        case ESP_RST_SW:         return "redemarrage logiciel";
+        case ESP_RST_PANIC:      return "PANNE LOGICIELLE";
+        case ESP_RST_INT_WDT:    return "CHIEN DE GARDE (interruptions)";
+        case ESP_RST_TASK_WDT:   return "CHIEN DE GARDE (tache bloquee)";
+        case ESP_RST_WDT:        return "CHIEN DE GARDE";
+        case ESP_RST_DEEPSLEEP:  return "reveil";
+        case ESP_RST_BROWNOUT:   return "CHUTE DE TENSION";
+        case ESP_RST_USB:        return "reset par USB";
+        case ESP_RST_JTAG:       return "reset par JTAG";
+        case ESP_RST_PWR_GLITCH: return "PERTURBATION D'ALIMENTATION";
+        case ESP_RST_CPU_LOCKUP: return "BLOCAGE DU PROCESSEUR";
+        default:                 return "inconnue";
+    }
+}
+
+static bool is_abnormal_reset(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_PANIC:
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:
+        case ESP_RST_BROWNOUT:
+        case ESP_RST_PWR_GLITCH:
+        case ESP_RST_CPU_LOCKUP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * @brief Relève la cause du démarrage et tient à jour les compteurs persistants.
+ *
+ * Sans console branchée, la trace d'une panne est perdue : ces compteurs (affichés par `status` et
+ * dans le journal périodique) permettent de savoir après coup si l'appareil a redémarré anormalement.
+ */
+static void record_boot() {
+    g_reset_reason = esp_reset_reason();
+
+    nvs_handle_t nvs_h = 0;
+    if (nvs_open("zb_bsb_diag", NVS_READWRITE, &nvs_h) != ESP_OK) {
+        return;
+    }
+    nvs_get_u32(nvs_h, "boots", &g_boot_stats.boots);
+    nvs_get_u32(nvs_h, "bad_boots", &g_boot_stats.abnormal);
+    nvs_get_u8(nvs_h, "last_bad", &g_boot_stats.last_abnormal);
+
+    ++g_boot_stats.boots;
+    nvs_set_u32(nvs_h, "boots", g_boot_stats.boots);
+    if (is_abnormal_reset(g_reset_reason)) {
+        ++g_boot_stats.abnormal;
+        g_boot_stats.last_abnormal = static_cast<uint8_t>(g_reset_reason);
+        nvs_set_u32(nvs_h, "bad_boots", g_boot_stats.abnormal);
+        nvs_set_u8(nvs_h, "last_bad", g_boot_stats.last_abnormal);
+    }
+    nvs_commit(nvs_h);
+    nvs_close(nvs_h);
 }
 
 static void check_boot_button() {
@@ -195,8 +268,18 @@ void setup() {
              running_part ? running_part->label : "n/a");
     ESP_LOGI(TAG, "==========================================================");
 
-    // 1. Initialisation de la flash NVS
+    // 1. Initialisation de la flash NVS, puis relevé de la cause de ce démarrage
     init_nvs();
+    record_boot();
+    if (is_abnormal_reset(g_reset_reason)) {
+        ESP_LOGE(TAG, "  Demarrage n.%lu apres une PANNE : %s (%lu demarrage(s) anormal(aux) au total)",
+                 static_cast<unsigned long>(g_boot_stats.boots), reset_reason_text(g_reset_reason),
+                 static_cast<unsigned long>(g_boot_stats.abnormal));
+    } else {
+        ESP_LOGI(TAG, "  Demarrage n.%lu, cause : %s (%lu demarrage(s) anormal(aux) au total)",
+                 static_cast<unsigned long>(g_boot_stats.boots), reset_reason_text(g_reset_reason),
+                 static_cast<unsigned long>(g_boot_stats.abnormal));
+    }
 
     // 2. Initialisation matérielle du XIAO ESP32-C6 (Commutateur RF persisté en NVS + GPIO)
     // Par défaut : OFF (false = Antenne céramique SMD intégrée)
