@@ -3,6 +3,7 @@
 #include <cmath>
 #include "bsb_types.h"
 #include "bsb_frame.h"
+#include "bsb_freshness.h"
 
 using namespace bsb;
 
@@ -936,6 +937,85 @@ void test_heating_first_verdict_after_boot_is_published_as_is(void) {
     TEST_ASSERT_TRUE(rebooted_while_idle.update(heating, 5000 + HEATING_CONFIRM_MS).heating);
 }
 
+// ============================================================================
+// Fraîcheur des mesures : une valeur qui n'arrive plus ne reste pas affichée
+// ============================================================================
+void test_measurement_becomes_unavailable_when_no_longer_read(void) {
+    const uint64_t max_age = 180000; // 3 min
+    MeasurementWatch watch;
+    uint32_t expired[MeasurementWatch::MAX_FIELDS] = {0};
+
+    TEST_ASSERT_TRUE(watch.track(fields::DHW_TANK_TEMP, 10000));
+    TEST_ASSERT_TRUE(watch.track(fields::OUTDOOR_TEMP, 10000));
+    TEST_ASSERT_TRUE(watch.track(fields::OUTDOOR_TEMP, 99999)); // Déjà surveillé : point de départ inchangé
+    TEST_ASSERT_EQUAL_UINT(2, watch.tracked_count());
+
+    // Jamais lu depuis le démarrage : le délai court depuis le début de la surveillance
+    TEST_ASSERT_EQUAL_UINT(0, watch.expire(10000 + max_age - 1, max_age, expired, MeasurementWatch::MAX_FIELDS));
+    TEST_ASSERT_FALSE(watch.note_value(fields::OUTDOOR_TEMP, 100000)); // Lu : il n'était pas indisponible
+    TEST_ASSERT_EQUAL_UINT(1, watch.expire(10000 + max_age, max_age, expired, MeasurementWatch::MAX_FIELDS));
+    TEST_ASSERT_EQUAL_HEX32(fields::DHW_TANK_TEMP, expired[0]);
+    TEST_ASSERT_TRUE(watch.is_unavailable(fields::DHW_TANK_TEMP));
+    TEST_ASSERT_FALSE(watch.is_unavailable(fields::OUTDOOR_TEMP));
+
+    // Signalé une seule fois, tant que la mesure ne revient pas
+    TEST_ASSERT_EQUAL_UINT(0, watch.expire(100000 + max_age - 1, max_age, expired, MeasurementWatch::MAX_FIELDS));
+    TEST_ASSERT_EQUAL_UINT(1, watch.unavailable_count());
+    TEST_ASSERT_EQUAL_HEX32(fields::DHW_TANK_TEMP, watch.unavailable_field(0));
+    TEST_ASSERT_EQUAL_HEX32(0, watch.unavailable_field(1));
+
+    // La mesure revient : elle redevient disponible, et le délai repart de cette lecture
+    TEST_ASSERT_TRUE(watch.note_value(fields::DHW_TANK_TEMP, 500000));
+    TEST_ASSERT_FALSE(watch.is_unavailable(fields::DHW_TANK_TEMP));
+    TEST_ASSERT_FALSE(watch.note_value(fields::DHW_TANK_TEMP, 501000));
+    TEST_ASSERT_EQUAL_UINT(1, watch.expire(501000 + max_age - 1, max_age, expired, MeasurementWatch::MAX_FIELDS));
+    TEST_ASSERT_EQUAL_HEX32(fields::OUTDOOR_TEMP, expired[0]); // Lu pour la dernière fois à 100000
+
+    // Une horloge qui reculerait ne fait rien expirer
+    MeasurementWatch clock_back;
+    clock_back.track(fields::HP_FLOW_TEMP, 900000);
+    TEST_ASSERT_EQUAL_UINT(0, clock_back.expire(1000, max_age, expired, MeasurementWatch::MAX_FIELDS));
+}
+
+void test_measurement_answered_without_value_is_unavailable_at_once(void) {
+    const uint64_t max_age = 180000;
+    MeasurementWatch watch;
+    uint32_t expired[4] = {0};
+    watch.track(fields::DHW_TANK_TEMP, 0);
+    watch.note_value(fields::DHW_TANK_TEMP, 1000);
+
+    // Sonde en défaut : le régulateur répond « --- », la mesure est indisponible sans attendre le délai
+    TEST_ASSERT_TRUE(watch.note_no_value(fields::DHW_TANK_TEMP));
+    TEST_ASSERT_TRUE(watch.is_unavailable(fields::DHW_TANK_TEMP));
+    TEST_ASSERT_FALSE(watch.note_no_value(fields::DHW_TANK_TEMP)); // Déjà signalé
+    TEST_ASSERT_EQUAL_UINT(0, watch.expire(1000 + max_age, max_age, expired, 4)); // Rien de neuf à signaler
+
+    // Un paramètre non surveillé n'est jamais signalé
+    TEST_ASSERT_FALSE(watch.note_no_value(fields::Z1_ROOM_TEMP));
+    TEST_ASSERT_FALSE(watch.note_value(fields::Z1_ROOM_TEMP, 2000));
+    TEST_ASSERT_FALSE(watch.is_unavailable(fields::Z1_ROOM_TEMP));
+}
+
+void test_measurement_watch_reports_every_expired_field_even_with_a_small_buffer(void) {
+    const uint64_t max_age = 180000;
+    MeasurementWatch watch;
+    for (uint32_t i = 0; i < MeasurementWatch::MAX_FIELDS; ++i) {
+        TEST_ASSERT_TRUE(watch.track(0x10000000UL + i, 0));
+    }
+    TEST_ASSERT_FALSE(watch.track(0x20000000UL, 0)); // Table pleine : ce paramètre n'est pas surveillé
+    TEST_ASSERT_EQUAL_UINT(MeasurementWatch::MAX_FIELDS, watch.tracked_count());
+
+    // Tampon de 5 places : rien n'est perdu, les paramètres restants sont rendus aux appels suivants
+    uint32_t expired[5] = {0};
+    size_t   total      = 0;
+    for (int call = 0; call < 10; ++call) {
+        total += watch.expire(max_age, max_age, expired, 5);
+    }
+    TEST_ASSERT_EQUAL_UINT(MeasurementWatch::MAX_FIELDS, total);
+    TEST_ASSERT_EQUAL_UINT(MeasurementWatch::MAX_FIELDS, watch.unavailable_count());
+    TEST_ASSERT_EQUAL_UINT(0, watch.expire(max_age, max_age, nullptr, 5)); // Tampon absent : sans effet
+}
+
 void test_unfed_zone_is_reported_only_when_it_outlasts_a_normal_start(void) {
     // Relevé terrain (2026-11-14 22:47-22:49) : mise en route après un arrêt prolongé, zone 1 en demande
     // (114), compresseur annoncé en marche, départ 15,6 C et retour 18,5 C. La garde hydraulique tient la
@@ -1099,6 +1179,9 @@ static int run_all_bsb_tests() {
     RUN_TEST(test_heating_guard_only_refutes_an_actual_zone_demand);
     RUN_TEST(test_heating_start_is_published_only_once_confirmed);
     RUN_TEST(test_heating_first_verdict_after_boot_is_published_as_is);
+    RUN_TEST(test_measurement_becomes_unavailable_when_no_longer_read);
+    RUN_TEST(test_measurement_answered_without_value_is_unavailable_at_once);
+    RUN_TEST(test_measurement_watch_reports_every_expired_field_even_with_a_small_buffer);
     RUN_TEST(test_unfed_zone_is_reported_only_when_it_outlasts_a_normal_start);
     RUN_TEST(test_heating_resumes_after_a_dhw_charge_once_the_guard_lifts);
     return UNITY_END();
