@@ -17,15 +17,17 @@
    - La pile protocolaire BSB est écrite intégralement de zéro en C++17/20 propre et documenté.
    - Aucune allocation dynamique (`malloc`/`std::vector`) dans l'automate de réception des trames (`BsbFrameParser`), garantissant une stabilité mémoire absolue 24h/24 et 7j/7.
 2. **Coexistence Parfaite avec Cozytouch / Navilink (`0x0A`)** :
-   - Intègre un mécanisme **CSMA d'évitement de collision** (détection de silence sur le bus et fenêtre de garde de `130 ms` lorsqu'un autre maître interroge la PAC).
+   - Intègre un mécanisme **CSMA d'évitement de collision** (détection de silence sur le bus et fenêtre de garde de `190 ms` lorsqu'un autre maître interroge la PAC).
    - **Snooping Passif** : écoute les réponses `RET` demandées par le pont radio officiel Cozytouch (`0x0A`) pour mettre à jour ses propres capteurs Zigbee sans dupliquer le trafic sur le bus.
 3. **Auto-Découverte Matérielle & Persistance NVS** :
    - Au premier démarrage, **ZB-BSB** scanne automatiquement le bus BSB pour découvrir la topologie exacte de votre installation :
      - Modèle du régulateur (`6224`, ex: `RVS21.831F/127`) et type système (`6223`).
      - Présence de la **Zone 1** (ex: Radiateurs) et de la **Zone 2** (ex: Plancher chauffant sur module d'extension `AVS55`).
-     - Détection intelligente des sondes physiquement câblées par **filtrage des valeurs sentinelles** (`50.0 °C` renvoyé lorsqu'une zone n'a pas de sonde d'ambiance filaire, `0.0 °C` lorsqu'une zone n'a pas de sonde de départ dédiée, ou octet d'état `flag_byte != 0x00`).
+     - Détection intelligente des sondes physiquement câblées par **filtrage des valeurs sentinelles** (`50.0 °C` renvoyé lorsqu'une zone n'a pas de sonde d'ambiance filaire, `0.0 °C` lorsqu'une zone n'a pas de sonde de départ dédiée).
+     - Les organes pour lesquels le régulateur répond `---` (octet d'état à `1` : pompe non câblée, sortie non affectée) sont considérés comme **absents** et ne sont pas exposés, au lieu d'apparaître comme éternellement « à l'arrêt ».
      - Présence d'un **Ballon ECS (DHW)** et d'un **Appoint Électrique**.
-   - La topologie découverte est sauvegardée en mémoire non-volatile (**NVS**) : les redémarrages suivants sont instantanés et **seuls les Endpoints/Clusters Zigbee correspondant aux organes réellement présents** sont exposés au coordinateur.
+   - La topologie n'est retenue que si **deux scans consécutifs concordent**, puis elle est sauvegardée en mémoire non-volatile (**NVS**) : **seuls les Endpoints/Clusters Zigbee correspondant aux organes réellement présents** sont exposés au coordinateur.
+   - À chaque démarrage, consignes, modes et températures sont **relus sur le bus avant le lancement de Zigbee** (3 à 4 s) : Home Assistant ne reçoit jamais de valeurs périmées à la reconnexion.
 4. **Routeur Zigbee 3.0 Haute Puissance (`+20 dBm`) & Switch Antenne Externe Dynamique** :
    - Alimenté en continu près de la pompe à chaleur, l'ESP32-C6 fonctionne en **Routeur Zigbee (`ZCZR`)** avec sa puissance d'émission poussée à **`+20 dBm`**, renforçant le maillage Zigbee de votre logement (garage, buanderie, sous-sol).
    - **Sélection d'antenne RF à chaud** : expose une entité `switch` Zigbee sur l'**Endpoint 7** permettant de basculer depuis Home Assistant entre l'antenne céramique SMD intégrée (**OFF**, par défaut) et une antenne externe branchée sur le connecteur **U.FL** (**ON**) sans recompiler le firmware (réglage sauvegardé en NVS).
@@ -144,7 +146,7 @@ Le petit bouton-poussoir `BOOT` situé sur la carte XIAO permet d'effectuer les 
 
 * **Appui court (< 3 secondes)** : Aucun effet (sécurité contre les faux contacts).
 * **Maintien de 3 à 8 secondes (LED clignote rapidement)** : 
-  * Relâchez le bouton : efface le cache de topologie NVS, relance un scan complet **Auto-Discovery** sur le bus BSB et redémarre la passerelle. Idéal après avoir raccordé une nouvelle sonde, un ballon ECS ou une extension Zone 2.
+  * Relâchez le bouton : la passerelle redémarre et relance un scan complet **Auto-Discovery** sur le bus BSB. La topologie en place n'est remplacée qu'une fois la nouvelle découverte réussie (si la PAC ne répond pas à ce moment-là, la passerelle continue comme avant et réessaiera). Idéal après avoir raccordé une nouvelle sonde, un ballon ECS ou une extension Zone 2.
 * **Maintien supérieur à 8 secondes (LED clignote en stroboscope)** :
   * Relâchez le bouton : effectue un **Reset Usine Zigbee complet** (quitte le réseau coordinateur, efface les clés d'appairage ZBOSS) + effacement NVS de la PAC + redémarrage en mode appairage neuf.
 
@@ -161,7 +163,7 @@ Lors du premier démarrage, **ZB-BSB** interroge la PAC et n'active que les Endp
 | **EP 3** | **Si Hydraulique Départ PAC ou Zone 1 présents** | • `TemperatureMeasurement` (`0x0402`) : **Temp. Départ PAC (`8412`)**<br>• `BinaryInput` (`0x000F`) : **Circulateur Principal PAC (`8406`) / Pompe Zone 1 Q2 (`8730`)**<br>• `AnalogInput` (`0x000C`) : **Code Statut PAC (`8006`)**<br>• `AnalogOutput` (`0x000D`) : **Sonde Temp. Externe Zone 1 (`0–35 °C`)** | • Sensor **Température Départ PAC (°C)**<br>• Binary Sensor **Circulateur Principal PAC / Pompe Zone 1**<br>• Sensor **Code Statut PAC (`8006`)**<br>• Number **Sonde Temp. Externe Zone 1 (°C)** |
 | **EP 4** | **Si Hydraulique Retour PAC ou Zone 2 présents** | • `TemperatureMeasurement` (`0x0402`) : **Temp. Retour PAC (`8410`)**<br>• `AnalogInput` (`0x000C`) : **Code Statut Zone 1 (`8000`)**<br>• `AnalogOutput` (`0x000D`) : **Sonde Temp. Externe Zone 2 (`0–35 °C`)** | • Sensor **Température Retour PAC (°C)**<br>• Sensor **Code Statut Zone 1 (`8000`)**<br>• Number **Sonde Temp. Externe Zone 2 (°C)** |
 | **EP 5** | **Si Sonde Départ Zone (`8773`/`8743`) présente** | • `TemperatureMeasurement` (`0x0402`) : **Temp. Départ Zone (`8773` / `8743`)**<br>• `AnalogInput` (`0x000C`) : **Consigne Active Zone 2 (`8771`)** | • Sensor **Température Départ Zone (°C)**<br>• Sensor **Consigne Active Zone 2 (°C)** |
-| **EP 6** | **Si Ballon ECS (`8830`/`1610`) présent** | • `Thermostat` (`0x0201`) : **Thermostat Ballon ECS** (Mode `Off`/`Heat`, Consigne nominale `1610` 30–65 °C, Consigne réduite `1612`, État de chauffe active `8003`)<br>• `TemperatureMeasurement` (`0x0402`) : **Temp. Ballon ECS (`8830`)**<br>• `AnalogOutput` (`0x000D`) : **Consigne Ballon ECS (`1610`)**<br>• `OnOff` (`0x0006`) : **Activation Marche/Arrêt ECS (`1600`)**<br>• `AnalogInput` (`0x000C`) : **Code Statut ECS (`8003`)** | • Climate **Thermostat Ballon ECS (30–65 °C)**<br>• Sensor **Température Ballon ECS (°C)**<br>• Number **Consigne Ballon ECS (30–65 °C)**<br>• Switch **Marche/Arrêt ECS**<br>• Sensor **Code Statut ECS (`8003`)** |
+| **EP 6** | **Si Ballon ECS (`8830`/`1610`) présent** | • `Thermostat` (`0x0201`) : **Thermostat Ballon ECS** (Mode `Off`/`Heat`/`Sleep` = Arrêt / Marche / Éco, Consigne nominale `1610` 30–65 °C, Consigne réduite `1612`, État de chauffe active `8003`)<br>• `TemperatureMeasurement` (`0x0402`) : **Temp. Ballon ECS (`8830`)**<br>• `AnalogOutput` (`0x000D`) : **Consigne Ballon ECS (`1610`)**<br>• `OnOff` (`0x0006`) : **Activation Marche/Arrêt ECS (`1600`)**<br>• `AnalogInput` (`0x000C`) : **Code Statut ECS (`8003`)** | • Climate **Thermostat Ballon ECS (30–65 °C)**<br>• Sensor **Température Ballon ECS (°C)**<br>• Number **Consigne Ballon ECS (30–65 °C)**<br>• Switch **Marche/Arrêt ECS**<br>• Sensor **Code Statut ECS (`8003`)** |
 | **EP 7** | **Toujours actif** (Auxiliaires & Switch Antenne RF) | • `BinaryInput` (`0x000F`) : **État Appoint Électrique (`8402`)**<br>• `AnalogInput` (`0x000C`) : **Modulation Appoint % (`8414`)**<br>• `TemperatureMeasurement` (`0x0402`) : **Temp. Ambiante Zone 1 (`8740`)** *(si sonde filaire BSB présente)*<br>• `OnOff` (`0x0006`) : **Switch Antenne Zigbee Externe U.FL (`GPIO14`)** | • Binary Sensor **Appoint Électrique**<br>• Sensor **Modulation Appoint (%)**<br>• Sensor **Température Ambiante Zone 1 (°C)** *(si filaire)*<br>• Switch **Antenne Zigbee Externe U.FL** (`OFF` par défaut) |
 
 ---
@@ -181,20 +183,21 @@ Chaque thermostat dispose d'une entité `number` dédiée :
    - Sélectionnez l'entité **`number` Sonde Temp. Externe Zone 1 (ou Zone 2)** dans la seconde liste déroulante.
 
 ### Méthode 2 — Par Binding Zigbee Direct (sans passer par Home Assistant)
-Les **Endpoints 1 (Thermostat Zone 1)** et **2 (Thermostat Zone 2)** embarquent également un cluster client `TemperatureMeasurement` (`0x0402`). Vous pouvez donc lier (**Bind**) directement un thermomètre Zigbee vers l'Endpoint 1 ou 2 depuis l'interface ZHA ou Zigbee2MQTT.
+Les **Endpoints 1 (Thermostat Zone 1)** et **2 (Thermostat Zone 2)** embarquent également un cluster client `TemperatureMeasurement` (`0x0402`). Vous pouvez donc lier (**Bind**) directement un thermomètre Zigbee vers l'Endpoint 1 ou 2 : depuis l'onglet *Bind* de **Zigbee2MQTT**, ou sous **ZHA** avec `zha_toolkit` (`bind_ieee`), l'interface de liaison de ZHA ne proposant pas ce type de cluster.
 
 ### Fonctionnement interne côté PAC (BSB)
 Dès qu'une température externe valide (`4.0 °C` à `38.0 °C`) est reçue pour une zone :
 1. Elle met immédiatement à jour la température ambiante affichée sur la carte **Thermostat** correspondante dans Home Assistant (`LocalTemperature` + bit `RemoteSensing` activé).
-2. Elle est diffusée sur le bus BSB vers le régulateur de la PAC via une trame **`INF`** (`0x2D3D051E` pour Zone 1, `0x2E3D051E` pour Zone 2), puis **automatiquement ré-émise toutes les 60 secondes** par l'ESP32-C6 pour que le régulateur Siemens RVS21 maintienne la régulation d'ambiance active.
-3. **Watchdog de sécurité (30 minutes)** : si la sonde externe ne donne plus signe de vie pendant 30 minutes (ou si vous réglez l'entité `number` sur `0`), **ZB-BSB** repasse automatiquement sur la sonde filaire BSB de la PAC.
+2. Elle est envoyée au régulateur de la PAC par une trame **`INF`** (paramètres `10000` / `10001` : `0x2D3D0215` pour la Zone 1, `0x2E3E0215` pour la Zone 2), puis **automatiquement ré-émise toutes les 60 secondes** par l'ESP32-C6 pour que le régulateur Siemens RVS21 maintienne la régulation d'ambiance active. Le pont vérifie en continu que le régulateur la prend bien en compte en relisant `8740` / `8770` (visible dans le diagnostic série).
+3. **Chien de garde** : sans nouvelle valeur pendant **30 minutes** via l'entité `number` (ou **3 heures** pour un thermomètre lié en direct, qui ne rapporte que sur changement), ou si vous réglez l'entité `number` sur `0`, **ZB-BSB** cesse d'injecter la température et rend la main au régulateur. Le blueprint ajoute sa propre limite (`Âge maximal de la mesure`, 180 minutes par défaut) pour ne pas maintenir en vie une sonde morte.
+4. **Zone sans aucune sonde d'ambiance** (ni filaire, ni externe active) : la « température actuelle » du thermostat dans Home Assistant affiche alors la **consigne active** du régulateur, faute de mesure. Ce n'est pas une température mesurée.
 
 ---
 
 ## Intégration dans Home Assistant
 
 ### Option A — ZHA (Zigbee Home Automation)
-1. Copiez le fichier [`zha_quirk/zb_bsb.py`](zha_quirk/zb_bsb.py) dans `/config/zha_quirks/zb_bsb.py` et activez les quirks personnalisés dans votre `configuration.yaml` :
+1. Copiez le fichier [`zha_quirk/zb_bsb.py`](zha_quirk/zb_bsb.py) dans `/config/zha_quirks/zb_bsb.py` et activez les quirks personnalisés dans votre `configuration.yaml`. **Ce quirk est indispensable** : les quatre régimes du régulateur (Hors-gel, Automatique, Réduit, Confort) sont portés par quatre valeurs de `SystemMode` que l'entité thermostat standard de ZHA ne sait pas toutes afficher. Après toute modification du fichier, **redémarrez Home Assistant** (un simple rechargement de ZHA ne remplace pas la classe thermostat déjà chargée) :
    ```yaml
    zha:
      enable_quirks: true
@@ -245,9 +248,9 @@ Une fois appairé sous **ZHA** ou **Zigbee2MQTT**, la fiche de l'appareil **`Atl
 ### 3. Carte Configuration & Diagnostic (`diag.png`)
 * **Mise à Jour Firmware Zigbee OTA en Direct** : Suivi en direct du téléversement et de l'installation du micrologiciel OTA avec barre de progression et pourcentage d'avancement (ex. `Installation en cours (40,17 %)`).
 * **Diagnostics Décodés en Clair** : Traduction textuelle immédiate des états internes du régulateur pour chaque circuit :
-  * Pompe à chaleur : ex. `Chauffage_compresseur`
-  * Ballon ECS : ex. `Charge_temperature_atteinte`
-  * Zones de chauffage : ex. `En_veille_pas_de_demande`, `Abaissement_reduit`
+  * Pompe à chaleur : ex. `Compresseur_1_en_marche`, `Pas_de_demande`
+  * Ballon ECS : ex. `En_charge_consigne_nominale`, `Charge_terminee_temp_nominale`
+  * Zones de chauffage : ex. `Chauffage_confort`, `Limitation_temperature_ambiante`, `Restreint_priorite_ECS`
 * **Demandes de Chauffage (%)** : Pourcentage calculé en temps réel de la demande de chauffe par zone et de la régulation PI.
 * **Métriques Radio Zigbee & Maintenance** :
   * **LQI** (qualité de liaison jusqu'à 255) et **RSSI** (force du signal en dBm) en direct.
@@ -258,7 +261,7 @@ Une fois appairé sous **ZHA** ou **Zigbee2MQTT**, la fiche de l'appareil **`Atl
 
 ## Mises à Jour Firmware Zigbee OTA (`zha_toolkit`, GitHub Releases & Serveur Personnalisé)
 
-**ZB-BSB** intègre nativement un client **Zigbee OTA Upgrade (`0x0019`)** sur l'**Endpoint 1**, appuyé sur une table à double partition OTA (`app0` / `app1` dans `zigbee_zczr.csv`) avec protection anti-brick par rollback automatique (`esp_ota_mark_app_valid_cancel_rollback()`).
+**ZB-BSB** intègre nativement un client **Zigbee OTA Upgrade (`0x0019`)** sur l'**Endpoint 1**, appuyé sur une table à double partition OTA (`app0` / `app1` dans `zigbee_zczr.csv`) avec protection anti-brick par rollback automatique : une nouvelle image n'est validée (`esp_ota_mark_app_valid_cancel_rollback()`) qu'après 30 s de connexion Zigbee stable ; si elle ne retrouve pas le réseau en 10 minutes, l'ESP32-C6 revient de lui-même à la version précédente.
 
 À chaque compilation (`pio run` en local ou sur GitHub Actions), le script [`scripts/build_ota.py`](scripts/build_ota.py) génère automatiquement dans le dossier `ota/` :
 - `ota/zb_bsb.ota` et `ota/zb_bsb_v<VERSION_HEX>.ota` — l'image Zigbee OTA standard (`Manufacturer = 0x131B / 4891`, `Image Type = 0x0001`).
@@ -330,11 +333,17 @@ pio run -e seeed_xiao_esp32c6 -t upload -t monitor
 ```
 
 ### 2. Exécuter la suite de tests unitaires (`Unity`)
-Le projet inclut une suite complète de **13 tests unitaires** dans [`test/test_bsb_protocol/test_main.cpp`](test/test_bsb_protocol/test_main.cpp) couvrant :
+Le projet inclut une suite complète de **43 tests unitaires** dans [`test/test_bsb_protocol/test_main.cpp`](test/test_bsb_protocol/test_main.cpp) couvrant :
 - Le calcul **CRC-16 CCITT (XMODEM)** sur vecteurs standards et trames BSB réelles.
 - La sérialisation des trames `GET`, `SET` (température et mode) et `INF` (broadcast) avec permutation des octets de poids fort du `field_id`.
 - L'automate de réception `BsbFrameParser` (températures positives et négatives en complément à 2, snooping des trames `0x0A` Cozytouch, rejet des CRC corrompus, resynchronisation sur bruit de bus et longueurs invalides).
+- La **resynchronisation après une trame rejetée** : les octets d'une trame au CRC faux sont relus à partir du `0xDC` suivant au lieu d'être jetés. Une trame arrivée amputée d'un octet ne fait ainsi plus perdre la trame qui la suit.
 - Le filtrage des valeurs sentinelles pour l'**Auto-Discovery** (`50.0 °C` pour sonde d'ambiance absente, `0.0 °C` pour sonde départ absente).
+- Les tables de codes statut Siemens (`8000` / `8001` / `8003` / `8006`) et le calcul de l'**état de chauffe réel** de chaque thermostat (zone en limitation d'ambiance pendant qu'une autre chauffe, priorité ECS, dégivrage, appoint électrique...).
+- La **confirmation de mise en chauffe** : un thermostat n'est annoncé « en chauffe » qu'après 30 s de chauffe ininterrompue (le temps que toutes les mesures aient été relues sur le bus), alors que l'arrêt est publié immédiatement.
+- Les **codes statut absents des tables de référence** (par exemple le code `255` que le RVS21 des Alféa donne à une zone pendant une consigne temporaire réglée sur l'afficheur de la PAC) : la pompe du circuit dit alors si la zone est alimentée ; sans pompe observable, rien n'est affirmé.
+- Les **écritures sans objet** : une consigne ou un mode qui redemande la valeur que le régulateur a déjà n'est pas réécrit (le pont relit d'abord le paramètre). Une automatisation qui répète la même consigne toutes les cinq minutes ne fait ainsi plus aucune écriture sur le régulateur.
+- La **fraîcheur des mesures** : une mesure que le régulateur ne fournit plus (bus débranché ou régulateur hors tension depuis 3 min, sonde en défaut répondant `---`) s'affiche « inconnue » dans Home Assistant au lieu de rester figée sur sa dernière valeur, et revient d'elle-même à la lecture suivante.
 
 ```bash
 # Exécuter les tests sur PC (environnement natif, également exécuté par GitHub Actions CI)
@@ -343,6 +352,23 @@ pio test -e native -v
 # Vérifier la compilation des tests embarqués pour l'ESP32-C6
 pio test -e seeed_xiao_esp32c6 --without-uploading --without-testing
 ```
+
+### 3. Console série de diagnostic (USB-C, 115200 bauds)
+Branché en USB, le pont affiche toutes les 30 s son état de santé (trames BSB émises et reçues, taux de réponse du régulateur, rapports Zigbee, mémoire libre, durée de fonctionnement, **cause du dernier démarrage** et nombre de redémarrages anormaux depuis l'installation), suivi de l'état de chaque thermostat. Il accepte les commandes suivantes :
+
+| Commande | Effet |
+| :--- | :--- |
+| `status` (ou `diag`) | Affiche immédiatement l'état de santé et le diagnostic complet |
+| `report` | Ré-émet tous les attributs Zigbee vers le coordinateur |
+| `get <champ_hex>` | Lit un paramètre BSB brut (ex : `get 053D17DC`) : valeur sur 8, 16 ou 32 bits et octets de la réponse ; signale un paramètre absent (`---`) |
+| `set <champ_hex> <0..255>` | Écrit un paramètre BSB sur 8 bits (diagnostic avancé) |
+| `dhw on` \| `off` \| `0..2` | Change le mode ECS (`1600`) |
+| `bus off [minutes]` \| `bus on` | Coupe le bus BSB (ni émission ni écoute) pendant 1 à 60 min, 10 par défaut, puis le rétablit : permet de vérifier, sans rien débrancher, que les thermostats repassent à « inactif » et que les mesures s'affichent « inconnues » |
+| `antenna int` \| `ext` | Choisit l'antenne Zigbee (utile si le lien a été perdu après une bascule) |
+| `rescan` | Redémarre et relance l'Auto-Découverte (comme le bouton BOOT 3 à 8 s) ; l'ancienne topologie reste le repli en cas d'échec |
+| `reboot` | Redémarre le pont |
+
+La console est **non bloquante** : laisser le pont branché à un PC sans moniteur série ouvert n'a aucun effet sur son fonctionnement (les messages non lus sont simplement perdus).
 
 ---
 

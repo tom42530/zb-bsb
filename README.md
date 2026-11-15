@@ -17,15 +17,17 @@
    - The BSB protocol stack is written from scratch in clean, documented C++17/20.
    - Zero dynamic memory allocation (`malloc`/`std::vector`) inside the frame reception state machine (`BsbFrameParser`), ensuring rock-solid 24/7 memory stability.
 2. **Seamless Coexistence with Cozytouch / Navilink (`0x0A`)**:
-   - Built-in **CSMA collision avoidance** (bus silence detection and a `130 ms` guard window whenever another master queries the heat pump).
+   - Built-in **CSMA collision avoidance** (bus silence detection and a `190 ms` guard window whenever another master queries the heat pump).
    - **Passive Snooping**: listens to `RET` responses requested by the official Cozytouch radio bridge (`0x0A`) to update its own Zigbee attributes without duplicating bus traffic.
 3. **Hardware Auto-Discovery & NVS Persistence**:
    - On first boot, **ZB-BSB** automatically scans the BSB bus to discover the exact topology of your installation:
      - Controller model (`6224`, e.g., `RVS21.831F/127`) and system type (`6223`).
      - Presence of **Zone 1** (e.g., Radiators) and **Zone 2** (e.g., Underfloor heating on an `AVS55` extension module).
-     - Smart detection of physically wired sensors through **sentinel value filtering** (`50.0 °C` returned when a zone has no wired room sensor, `0.0 °C` when a zone has no dedicated flow sensor, or status byte `flag_byte != 0x00`).
+     - Smart detection of physically wired sensors through **sentinel value filtering** (`50.0 °C` returned when a zone has no wired room sensor, `0.0 °C` when a zone has no dedicated flow sensor).
+     - Components for which the controller answers `---` (status byte set to `1`: pump not wired, output not assigned) are treated as **absent** and are not exposed, instead of showing up as permanently "off".
      - Presence of a **Domestic Hot Water (DHW) Tank** and an **Electric Backup Heater**.
-   - The discovered topology is saved in non-volatile memory (**NVS**): subsequent reboots are instantaneous, and **only the Zigbee Endpoints/Clusters matching physically present components** are exposed to the coordinator.
+   - The topology is only kept if **two consecutive scans agree**, then it is saved in non-volatile memory (**NVS**): **only the Zigbee Endpoints/Clusters matching physically present components** are exposed to the coordinator.
+   - On every boot, setpoints, modes and temperatures are **re-read from the bus before Zigbee starts** (3 to 4 s): Home Assistant never receives stale values on reconnection.
 4. **High-Power Zigbee 3.0 Router (`+20 dBm`) & Dynamic External Antenna Switch**:
    - Continuously powered near the heat pump, the ESP32-C6 operates as a **Zigbee Router (`ZCZR`)** with its transmit power set to **`+20 dBm`**, strengthening your home Zigbee mesh (garage, utility room, basement).
    - **Runtime RF Antenna Selection**: exposes a dedicated Zigbee `switch` on **Endpoint 7** allowing you to toggle at runtime between the onboard SMD ceramic antenna (**OFF**, default) and an external antenna on the **U.FL** connector (**ON**) without recompiling the firmware (persisted in NVS).
@@ -144,7 +146,7 @@ The small `BOOT` pushbutton on the XIAO board allows maintenance operations with
 
 * **Short press (< 3 seconds)**: No effect (protection against accidental presses).
 * **Hold for 3 to 8 seconds (LED blinks rapidly)**:
-  * Release the button: clears the NVS topology cache, runs a full **Auto-Discovery** scan on the BSB bus, and reboots the bridge. Ideal after wiring a new sensor, a DHW tank, or a Zone 2 extension.
+  * Release the button: the bridge reboots and runs a full **Auto-Discovery** scan on the BSB bus. The current topology is only replaced once the new discovery succeeds (if the heat pump does not answer at that moment, the bridge carries on as before and will retry). Ideal after wiring a new sensor, a DHW tank, or a Zone 2 extension.
 * **Hold for more than 8 seconds (LED strobes)**:
   * Release the button: performs a **full Zigbee Factory Reset** (leaves the coordinator network, clears ZBOSS pairing keys) + clears heat pump NVS + reboots into fresh pairing mode.
 
@@ -161,7 +163,7 @@ On first boot, **ZB-BSB** queries the heat pump and activates only the Endpoints
 | **EP 3** | **If HP Flow Hydraulics or Zone 1 present** | • `TemperatureMeasurement` (`0x0402`): **HP Flow Temp. (`8412`)**<br>• `BinaryInput` (`0x000F`): **Main HP Circulator (`8406`) / Zone 1 Pump Q2 (`8730`)**<br>• `AnalogInput` (`0x000C`): **HP Status Code (`8006`)**<br>• `AnalogOutput` (`0x000D`): **Zone 1 External Temp. Sensor (`0–35 °C`)** | • Sensor **HP Flow Temperature (°C)**<br>• Binary Sensor **Main HP Circulator / Zone 1 Pump**<br>• Sensor **HP Status Code (`8006`)**<br>• Number **Zone 1 External Temp. Sensor (°C)** |
 | **EP 4** | **If HP Return Hydraulics or Zone 2 present** | • `TemperatureMeasurement` (`0x0402`): **HP Return Temp. (`8410`)**<br>• `AnalogInput` (`0x000C`): **Zone 1 Status Code (`8000`)**<br>• `AnalogOutput` (`0x000D`): **Zone 2 External Temp. Sensor (`0–35 °C`)** | • Sensor **HP Return Temperature (°C)**<br>• Sensor **Zone 1 Status Code (`8000`)**<br>• Number **Zone 2 External Temp. Sensor (°C)** |
 | **EP 5** | **If Zone Flow Sensor (`8773`/`8743`) present** | • `TemperatureMeasurement` (`0x0402`): **Zone Flow Temp. (`8773` / `8743`)**<br>• `AnalogInput` (`0x000C`): **Zone 2 Active Setpoint (`8771`)** | • Sensor **Zone Flow Temperature (°C)**<br>• Sensor **Zone 2 Active Setpoint (°C)** |
-| **EP 6** | **If DHW Tank (`8830`/`1610`) present** | • `Thermostat` (`0x0201`): **DHW Tank Thermostat** (Mode `Off`/`Heat`, Nominal setpoint `1610` 30–65 °C, Reduced setpoint `1612`, Active heating state `8003`)<br>• `TemperatureMeasurement` (`0x0402`): **DHW Tank Temp. (`8830`)**<br>• `AnalogOutput` (`0x000D`): **DHW Setpoint (`1610`)**<br>• `OnOff` (`0x0006`): **DHW On/Off Switch (`1600`)**<br>• `AnalogInput` (`0x000C`): **DHW Status Code (`8003`)** | • Climate **DHW Tank Thermostat (30–65 °C)**<br>• Sensor **DHW Tank Temperature (°C)**<br>• Number **DHW Setpoint (30–65 °C)**<br>• Switch **DHW On/Off**<br>• Sensor **DHW Status Code (`8003`)** |
+| **EP 6** | **If DHW Tank (`8830`/`1610`) present** | • `Thermostat` (`0x0201`): **DHW Tank Thermostat** (Mode `Off`/`Heat`/`Sleep` = Off / On / Eco, Nominal setpoint `1610` 30–65 °C, Reduced setpoint `1612`, Active heating state `8003`)<br>• `TemperatureMeasurement` (`0x0402`): **DHW Tank Temp. (`8830`)**<br>• `AnalogOutput` (`0x000D`): **DHW Setpoint (`1610`)**<br>• `OnOff` (`0x0006`): **DHW On/Off Switch (`1600`)**<br>• `AnalogInput` (`0x000C`): **DHW Status Code (`8003`)** | • Climate **DHW Tank Thermostat (30–65 °C)**<br>• Sensor **DHW Tank Temperature (°C)**<br>• Number **DHW Setpoint (30–65 °C)**<br>• Switch **DHW On/Off**<br>• Sensor **DHW Status Code (`8003`)** |
 | **EP 7** | **Always active** (Auxiliaries & RF Antenna Switch) | • `BinaryInput` (`0x000F`): **Electric Backup Heater State (`8402`)**<br>• `AnalogInput` (`0x000C`): **Backup Heater Modulation % (`8414`)**<br>• `TemperatureMeasurement` (`0x0402`): **Zone 1 Room Temp. (`8740`)** *(if wired BSB sensor present)*<br>• `OnOff` (`0x0006`): **External U.FL Zigbee Antenna Switch (`GPIO14`)** | • Binary Sensor **Electric Backup Heater**<br>• Sensor **Backup Heater Modulation (%)**<br>• Sensor **Zone 1 Room Temperature (°C)** *(if wired)*<br>• Switch **External U.FL Zigbee Antenna** (`OFF` by default) |
 
 ---
@@ -181,20 +183,21 @@ Each thermostat has a dedicated `number` entity:
    - Choose the **`number` External Temp. Sensor (Zone 1 or Zone 2)** entity in the second dropdown.
 
 ### Method 2 — Via Direct Zigbee Binding (without Home Assistant automation)
-**Endpoints 1 (Zone 1 Thermostat)** and **2 (Zone 2 Thermostat)** also include a client `TemperatureMeasurement` (`0x0402`) cluster. You can directly **Bind** any Zigbee thermometer to Endpoint 1 or 2 from the ZHA or Zigbee2MQTT interface.
+**Endpoints 1 (Zone 1 Thermostat)** and **2 (Zone 2 Thermostat)** also include a client `TemperatureMeasurement` (`0x0402`) cluster. You can directly **Bind** any Zigbee thermometer to Endpoint 1 or 2: from the *Bind* tab of **Zigbee2MQTT**, or under **ZHA** with `zha_toolkit` (`bind_ieee`), since the ZHA binding UI does not offer this kind of cluster.
 
 ### Internal Operation on the BSB Bus
 As soon as a valid external temperature (`4.0 °C` to `38.0 °C`) is received for a zone:
 1. It immediately updates the current room temperature displayed on the corresponding **Thermostat** card in Home Assistant (`LocalTemperature` + `RemoteSensing` bit set).
-2. It is broadcast on the BSB bus to the heat pump controller via an **`INF`** frame (`0x2D3D051E` for Zone 1, `0x2E3D051E` for Zone 2), and **automatically re-broadcast every 60 seconds** by the ESP32-C6 so the Siemens RVS21 controller keeps room temperature compensation active.
-3. **Safety Watchdog (30 minutes)**: if the external sensor stops reporting for 30 minutes (or if you set the `number` entity to `0`), **ZB-BSB** automatically falls back to the heat pump's internal BSB sensor.
+2. It is sent to the heat pump controller in an **`INF`** frame (parameters `10000` / `10001`: `0x2D3D0215` for Zone 1, `0x2E3E0215` for Zone 2), and **automatically re-sent every 60 seconds** by the ESP32-C6 so the Siemens RVS21 controller keeps room temperature compensation active. The bridge continuously checks that the controller actually uses it by reading back `8740` / `8770` (shown in the serial diagnostic).
+3. **Watchdog**: with no new value for **30 minutes** through the `number` entity (or **3 hours** for a directly bound thermometer, which only reports on change), or if you set the `number` entity to `0`, **ZB-BSB** stops injecting the temperature and hands control back to the controller. The blueprint adds its own limit (`max_age_minutes`, 180 minutes by default) so a dead sensor is not kept alive.
+4. **Zone with no room sensor at all** (neither wired nor an active external one): the thermostat's "current temperature" in Home Assistant then shows the controller's **active setpoint**, for lack of a measurement. It is not a measured temperature.
 
 ---
 
 ## Home Assistant Integration
 
 ### Option A — ZHA (Zigbee Home Automation)
-1. Copy [`zha_quirk/zb_bsb.py`](zha_quirk/zb_bsb.py) into `/config/zha_quirks/zb_bsb.py` and enable custom quirks in your `configuration.yaml`:
+1. Copy [`zha_quirk/zb_bsb.py`](zha_quirk/zb_bsb.py) into `/config/zha_quirks/zb_bsb.py` and enable custom quirks in your `configuration.yaml`. **This quirk is required**: the controller's four regimes (Frost protection, Automatic, Reduced, Comfort) are carried by four `SystemMode` values that the stock ZHA thermostat entity cannot all display. After any change to the file, **restart Home Assistant** (merely reloading ZHA does not replace the thermostat class already loaded).
    ```yaml
    zha:
      enable_quirks: true
@@ -245,9 +248,9 @@ Once paired via **ZHA** or **Zigbee2MQTT**, the **`Atlantic-Siemens ZB-BSB`** de
 ### 3. Configuration & Diagnostic (`diag.png`)
 * **Zigbee OTA Firmware Updates in Live Progress**: Real-time status of OTA updates with interactive progress bar (e.g., `Installation en cours (40,17 %)`).
 * **Decoded Status Enums**: Human-readable translated states for all circuits:
-  * Heat Pump: e.g. `Chauffage_compresseur`
-  * DHW Tank: e.g. `Charge_temperature_atteinte`
-  * Heating Zones: e.g. `En_veille_pas_de_demande`, `Abaissement_reduit`
+  * Heat Pump: e.g. `Compresseur_1_en_marche`, `Pas_de_demande`
+  * DHW Tank: e.g. `En_charge_consigne_nominale`, `Charge_terminee_temp_nominale`
+  * Heating Zones: e.g. `Chauffage_confort`, `Limitation_temperature_ambiante`, `Restreint_priorite_ECS`
 * **Heat Demand (%)**: Calculated instantaneous heating demand per zone and PI loop demand.
 * **Zigbee RF Quality & Diagnostics**:
   * Real-time **LQI** (Link Quality Indicator, up to 255) and **RSSI** signal strength (dBm).
@@ -258,7 +261,7 @@ Once paired via **ZHA** or **Zigbee2MQTT**, the **`Atlantic-Siemens ZB-BSB`** de
 
 ## Zigbee OTA Firmware Updates (`zha_toolkit`, GitHub Releases & Custom Server)
 
-**ZB-BSB** embeds a standard **Zigbee OTA Upgrade Client (`0x0019`)** on **Endpoint 1** using dual OTA flash partitions (`app0` / `app1` in `zigbee_zczr.csv`) with automatic rollback protection (`esp_ota_mark_app_valid_cancel_rollback()`).
+**ZB-BSB** embeds a standard **Zigbee OTA Upgrade Client (`0x0019`)** on **Endpoint 1** using dual OTA flash partitions (`app0` / `app1` in `zigbee_zczr.csv`) with automatic rollback protection: a new image is only confirmed (`esp_ota_mark_app_valid_cancel_rollback()`) after 30 s of stable Zigbee connectivity; if it cannot rejoin the network within 10 minutes, the ESP32-C6 reverts to the previous version on its own.
 
 Every time you run `pio run` (locally or in GitHub Actions), the post-build script [`scripts/build_ota.py`](scripts/build_ota.py) automatically generates:
 - `ota/zb_bsb.ota` and `ota/zb_bsb_v<VERSION_HEX>.ota` — the standard Zigbee OTA container (`Manufacturer = 0x131B / 4891`, `Image Type = 0x0001`).
@@ -330,11 +333,17 @@ pio run -e seeed_xiao_esp32c6 -t upload -t monitor
 ```
 
 ### 2. Run the unit test suite (`Unity`)
-The project includes a comprehensive suite of **13 unit tests** in [`test/test_bsb_protocol/test_main.cpp`](test/test_bsb_protocol/test_main.cpp) covering:
+The project includes a comprehensive suite of **43 unit tests** in [`test/test_bsb_protocol/test_main.cpp`](test/test_bsb_protocol/test_main.cpp) covering:
 - **CRC-16 CCITT (XMODEM)** calculation on standard test vectors and real BSB frames.
 - Serialization of `GET`, `SET` (temperature and mode), and `INF` (broadcast) frames with MSB byte swapping on `field_id`.
 - `BsbFrameParser` state machine (positive and negative two's complement temperatures, `0x0A` Cozytouch snooping, corrupted CRC rejection, resynchronization on bus noise and invalid lengths).
+- **Resynchronization after a rejected frame**: the bytes of a frame with a bad CRC are read again from the next `0xDC` instead of being discarded. A frame that arrives one byte short therefore no longer takes the following frame down with it.
 - Sentinel value filtering for **Auto-Discovery** (`50.0 °C` for missing room sensor, `0.0 °C` for missing flow sensor).
+- Siemens status code tables (`8000` / `8001` / `8003` / `8006`) and the computation of each thermostat's **real heating state** (zone in room-temperature limitation while another one heats, DHW priority, defrost, electric backup...).
+- The **heating start confirmation**: a thermostat is only reported as heating after 30 s of uninterrupted heating (long enough for every measurement to be read again from the bus), whereas a stop is published immediately.
+- **Status codes missing from the reference tables** (for instance code `255`, which the Alféa's RVS21 gives a zone while a temporary setpoint set on the heat pump's display is in force): the circuit pump then tells whether the zone is being fed; without an observable pump, nothing is asserted.
+- **Pointless writes**: a setpoint or mode asking for the value the controller already holds is not written again (the bridge reads the parameter back first). An automation that repeats the same setpoint every five minutes therefore no longer writes anything to the controller.
+- **Measurement freshness**: a measurement the controller no longer provides (bus unplugged or controller powered off for 3 min, faulty sensor answering `---`) shows as "unknown" in Home Assistant instead of staying frozen on its last value, and comes back by itself on the next reading.
 
 ```bash
 # Run unit tests on host PC (native environment, also run by GitHub Actions CI)
@@ -343,6 +352,23 @@ pio test -e native -v
 # Verify embedded test compilation for ESP32-C6
 pio test -e seeed_xiao_esp32c6 --without-uploading --without-testing
 ```
+
+### 3. Diagnostic serial console (USB-C, 115200 baud)
+When plugged in over USB, the bridge prints its health every 30 s (BSB frames sent and received, controller reply rate, Zigbee reports, free heap, uptime, **cause of the last boot** and number of abnormal restarts since installation), followed by the state of each thermostat. It accepts the following commands:
+
+| Command | Effect |
+| :--- | :--- |
+| `status` (or `diag`) | Prints the health line and the full diagnostic immediately |
+| `report` | Re-sends every Zigbee attribute to the coordinator |
+| `get <field_hex>` | Reads a raw BSB parameter (e.g. `get 053D17DC`): 8, 16 or 32-bit value and the bytes of the answer; reports a missing parameter (`---`) |
+| `set <field_hex> <0..255>` | Writes an 8-bit BSB parameter (advanced diagnostics) |
+| `dhw on` \| `off` \| `0..2` | Changes the DHW mode (`1600`) |
+| `bus off [minutes]` \| `bus on` | Cuts the BSB bus (no transmission, no listening) for 1 to 60 min, 10 by default, then restores it: lets you check, without unplugging anything, that the thermostats go back to idle and the measurements show as "unknown" |
+| `antenna int` \| `ext` | Selects the Zigbee antenna (handy if the link was lost after a switch) |
+| `rescan` | Reboots and runs Auto-Discovery again (same as holding BOOT for 3 to 8 s); the previous topology remains the fallback if it fails |
+| `reboot` | Restarts the bridge |
+
+The console is **non-blocking**: leaving the bridge plugged into a PC with no serial monitor open has no effect on its operation (unread messages are simply dropped).
 
 ---
 
